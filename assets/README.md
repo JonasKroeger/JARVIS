@@ -1,6 +1,7 @@
 # Neural brain HUD assets
 
-- `brain-ref-side.png` — visual north star (lateral / side-profile filament brain;
-  dense white→cyan mesh, teal junction glows at intersections only; deep black).
+- `brain-ref-side.png` — **primary painted brain** (lateral / side-profile filament
+  brain; dense white→cyan mesh, teal junction blooms; deep black + soft reflection).
+  `OrbVisualizer` loads this sprite and animates cyan synapse flashes over its
+  silhouette. Silhouette and surface match this photo.
 - `brain-ref.png` — earlier reference (kept for history).
-- Brain itself is procedural in `hud_widgets.py` (license-clean, no external mesh).
