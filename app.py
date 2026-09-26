@@ -55,12 +55,14 @@ try:
 except ImportError:
     sd = None  # type: ignore[assignment]
 
+# Always bound so _submit_user_message / closeEvent never NameError.
+cancel_speak = None  # type: ignore[assignment]
+speak_async = None  # type: ignore[assignment]
+transcribe_audio = None  # type: ignore[assignment]
 try:
     from voice import cancel_speak, speak_async, transcribe_audio
 except ImportError:
-    cancel_speak = None  # type: ignore[assignment]
-    speak_async = None  # type: ignore[assignment]
-    transcribe_audio = None  # type: ignore[assignment]
+    pass
 
 SAMPLE_RATE = 16000
 
