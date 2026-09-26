@@ -42,6 +42,20 @@ C_SPEAK = "#c8e8f4"
 
 MONO = '"Menlo", "SF Mono", "Consolas", "Courier New", monospace'
 
+
+def _a(x: float | int) -> int:
+    """Clamp to a valid QColor alpha (0..255)."""
+    try:
+        v = int(x)
+    except (TypeError, ValueError):
+        return 0
+    if v < 0:
+        return 0
+    if v > 255:
+        return 255
+    return v
+
+
 HUD_STYLESHEET = f"""
 QWidget#hudRoot {{
     background: transparent;
@@ -414,6 +428,25 @@ class OrbVisualizer(QWidget):
         super().mouseReleaseEvent(event)
 
     def paintEvent(self, event) -> None:  # noqa: N802, ARG002
+        try:
+            self._paint_orb(event)
+        except Exception as exc:  # noqa: BLE001
+            # Never let a paint glitch kill the Qt process.
+            try:
+                import traceback
+                from pathlib import Path
+                from datetime import datetime
+
+                log = Path(__file__).resolve().parent / "jarvis-debug.log"
+                ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                with open(log, "a", encoding="utf-8") as f:
+                    f.write(f"[{ts}] OrbVisualizer.paintEvent error: {exc!r}\n")
+                    f.write("".join(traceback.format_exception(type(exc), exc, exc.__traceback__)))
+                    f.flush()
+            except Exception:  # noqa: BLE001
+                pass
+
+    def _paint_orb(self, event) -> None:  # noqa: ARG002
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         w, h = self.width(), self.height()
@@ -428,13 +461,14 @@ class OrbVisualizer(QWidget):
             pulse = 0.65 + 0.35 * abs(math.sin(self._phase * 2.4))
         elif self._state == self.LISTENING:
             pulse = 0.8 + 0.2 * abs(math.sin(self._phase * 1.2))
-        alpha_scale = intensity * pulse
+        # intensity can be >1; never let scale push alphas past 255
+        alpha_scale = min(1.0, float(intensity) * float(pulse))
 
         # —— Starfield ——
         painter.setPen(Qt.PenStyle.NoPen)
         for sx, sy, sz, sph in self._stars:
             tw = 0.45 + 0.55 * (0.5 + 0.5 * math.sin(self._phase * 1.3 + sph))
-            a = int(28 + 90 * tw * (0.55 + 0.45 * intensity))
+            a = _a(28 + 90 * tw * (0.55 + 0.45 * intensity))
             c = QColor(primary)
             c.setAlpha(max(8, min(180, a)))
             painter.setBrush(c)
@@ -445,7 +479,7 @@ class OrbVisualizer(QWidget):
         # Soft bokeh
         for bx, by, br, bph in self._bokeh:
             tw = 0.5 + 0.5 * (0.5 + 0.5 * math.sin(self._wave + bph))
-            a = int(10 + 22 * tw * intensity)
+            a = _a(10 + 22 * tw * intensity)
             c = QColor(primary)
             c.setAlpha(a)
             painter.setBrush(c)
@@ -454,9 +488,9 @@ class OrbVisualizer(QWidget):
         # —— Soft outer aura ——
         glow = QRadialGradient(QPointF(cx, cy), radius * 1.85)
         c0 = QColor(primary)
-        c0.setAlpha(int(55 * alpha_scale))
+        c0.setAlpha(_a(55 * alpha_scale))
         c1 = QColor(primary)
-        c1.setAlpha(int(18 * alpha_scale))
+        c1.setAlpha(_a(18 * alpha_scale))
         glow.setColorAt(0.0, c0)
         glow.setColorAt(0.45, c1)
         glow.setColorAt(1.0, QColor(0, 0, 0, 0))
@@ -496,7 +530,7 @@ class OrbVisualizer(QWidget):
                 py = cy + math.sin(t) * rr
                 # Brightness varies along ring
                 bright = 0.55 + 0.45 * (0.5 + 0.5 * math.sin(t * 3 + self._phase + i))
-                a = int(base_a * alpha_scale * bright * (0.75 + 0.25 * pulse))
+                a = _a(base_a * alpha_scale * bright * (0.75 + 0.25 * pulse))
                 col = QColor(primary if i % 2 == 0 else accent)
                 col.setAlpha(max(10, min(255, a)))
                 painter.setBrush(col)
@@ -509,8 +543,8 @@ class OrbVisualizer(QWidget):
         # Core glow fill
         core_grad = QRadialGradient(QPointF(cx, cy), core_r * 1.15)
         cg0 = QColor(primary)
-        cg0.setAlpha(int(70 * alpha_scale))
-        cg1 = QColor(8, 20, 32, int(180 * intensity))
+        cg0.setAlpha(_a(70 * alpha_scale))
+        cg1 = QColor(8, 20, 32, _a(180 * intensity))
         core_grad.setColorAt(0.0, cg1)
         core_grad.setColorAt(0.55, QColor(4, 12, 20, 220))
         core_grad.setColorAt(1.0, cg0)
@@ -521,7 +555,7 @@ class OrbVisualizer(QWidget):
         # Hex mesh
         hex_pen = QPen(primary)
         ha = QColor(primary)
-        ha.setAlpha(int(110 * alpha_scale))
+        ha.setAlpha(_a(110 * alpha_scale))
         hex_pen.setColor(ha)
         hex_pen.setWidthF(1.0)
         painter.setPen(hex_pen)
@@ -551,7 +585,7 @@ class OrbVisualizer(QWidget):
         # Finer hex grid overlay (small cells)
         cell = core_r * 0.22
         fine = QColor(primary)
-        fine.setAlpha(int(55 * alpha_scale))
+        fine.setAlpha(_a(55 * alpha_scale))
         painter.setPen(QPen(fine, 0.7))
         for row in range(-3, 4):
             for col in range(-3, 4):
@@ -565,14 +599,14 @@ class OrbVisualizer(QWidget):
 
         # Bright rim on core
         rim = QColor(primary)
-        rim.setAlpha(int(200 * alpha_scale))
+        rim.setAlpha(_a(200 * alpha_scale))
         painter.setPen(QPen(rim, 1.6))
         painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.drawEllipse(QPointF(cx, cy), core_r, core_r)
 
         # Inner bright pip
         pip = QColor(C_CYAN_GLOW)
-        pip.setAlpha(int(210 * alpha_scale))
+        pip.setAlpha(_a(210 * alpha_scale))
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(pip)
         painter.drawEllipse(QPointF(cx, cy), 2.8 + 1.4 * pulse, 2.8 + 1.4 * pulse)

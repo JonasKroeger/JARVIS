@@ -10,6 +10,7 @@ Run from the JARVIS folder: python app.py
 
 from __future__ import annotations
 
+import atexit
 import os
 import sys
 import threading
@@ -79,6 +80,44 @@ def _debug_log(msg: str, exc: BaseException | None = None) -> None:
             f.flush()
     except Exception:  # noqa: BLE001
         pass
+
+
+
+def _install_crash_hooks() -> None:
+    """Log uncaught exceptions and process exit; flush always."""
+
+    def _excepthook(exc_type, exc, tb) -> None:
+        try:
+            ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            with open(_DEBUG_LOG, "a", encoding="utf-8") as f:
+                f.write(f"[{ts}] JARVIS uncaught exception: {exc_type.__name__}: {exc}\n")
+                f.write("".join(traceback.format_exception(exc_type, exc, tb)))
+                f.flush()
+        except Exception:  # noqa: BLE001
+            pass
+        sys.__excepthook__(exc_type, exc, tb)
+
+    sys.excepthook = _excepthook
+
+    try:
+        def _thread_hook(args) -> None:  # threading.ExceptHookArgs
+            try:
+                _debug_log(
+                    f"JARVIS thread exception in {getattr(args.thread, 'name', '?')!r}: "
+                    f"{args.exc_type.__name__}: {args.exc_value}",
+                    args.exc_value if isinstance(args.exc_value, BaseException) else None,
+                )
+            except Exception:  # noqa: BLE001
+                pass
+
+        threading.excepthook = _thread_hook  # type: ignore[attr-defined, assignment]
+    except Exception:  # noqa: BLE001
+        pass
+
+    def _on_exit() -> None:
+        _debug_log(f"JARVIS process exit (atexit) pid={os.getpid()}")
+
+    atexit.register(_on_exit)
 
 
 class JarvisWindow(QMainWindow):
@@ -419,10 +458,14 @@ class JarvisWindow(QMainWindow):
         super().keyReleaseEvent(event)
 
     def closeEvent(self, event) -> None:  # noqa: N802
+        _debug_log("JARVIS closeEvent (window closing)")
         self._speak_gen += 1
         if cancel_speak is not None:
             cancel_speak()
-        self._client.close()
+        try:
+            self._client.close()
+        except Exception as e:  # noqa: BLE001
+            _debug_log("JARVIS client.close failed", e)
         super().closeEvent(event)
 
 
@@ -495,6 +538,7 @@ class TranscribeWorker(QThread):
 
 def main() -> None:
     os.environ.setdefault("PYTHONUNBUFFERED", "1")
+    _install_crash_hooks()
     _debug_log(
         f"JARVIS starting pid={os.getpid()} platform={sys.platform} "
         f"python={sys.version.split()[0]} log={_DEBUG_LOG}"
@@ -502,19 +546,24 @@ def main() -> None:
     if sys.platform != "darwin" and not os.environ.get("ELEVENLABS_API_KEY"):
         print("Note: TTS uses ElevenLabs (set ELEVENLABS_API_KEY) or macOS `say`.")
     os.environ.setdefault("QT_ENABLE_HIGHDPI_SCALING", "1")
+    code = 1
     try:
         app = QApplication(sys.argv)
         app.setApplicationName("JARVIS")
         app.setStyle("Fusion")
+        # Avoid accidental Esc quitting the app on some platforms; our shortcut
+        # only hides the ghost input. Do not bind Esc to QApplication.quit.
         win = JarvisWindow()
         win.show()
         _debug_log("JARVIS window shown; entering event loop")
         code = app.exec()
         _debug_log(f"JARVIS event loop exited code={code}")
-        sys.exit(code)
     except Exception as e:  # noqa: BLE001
         _debug_log("JARVIS main() crashed", e)
         raise
+    finally:
+        _debug_log(f"JARVIS main() leaving with code={code}")
+    sys.exit(code)
 
 
 if __name__ == "__main__":
