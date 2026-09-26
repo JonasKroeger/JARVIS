@@ -46,7 +46,7 @@ C_SPEAK = "#c8e8f4"
 
 MONO = '"Menlo", "SF Mono", "Consolas", "Courier New", monospace'
 # Prefer system UI for captions — slightly more premium than pure mono
-UI_SANS = '"SF Pro Display", "SF Pro Text", "Helvetica Neue", "Segoe UI", sans-serif'
+UI_SANS = '"Helvetica Neue", "Avenir Next", ".AppleSystemUIFont", "Segoe UI", sans-serif'
 
 
 def _a(x: float | int) -> int:
