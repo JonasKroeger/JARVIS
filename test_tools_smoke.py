@@ -694,5 +694,140 @@ class VoiceTtsChunkTests(unittest.TestCase):
         self.assertLessEqual(jarvis.TOOLS_DECISION_NUM_PREDICT, 160)
 
 
+class BridgeSmokeTests(unittest.TestCase):
+    """Request parsing / health for the Coder → JARVIS bridge (no Ollama)."""
+
+    def test_build_messages_plain(self) -> None:
+        import bridge_server
+        import jarvis
+
+        msgs = bridge_server.build_messages("hello", None)
+        self.assertEqual(msgs[0]["role"], "system")
+        self.assertIn(jarvis.SYSTEM_PROMPT[:20], msgs[0]["content"])
+        self.assertEqual(msgs[-1], {"role": "user", "content": "hello"})
+
+    def test_build_messages_with_draft(self) -> None:
+        import bridge_server
+
+        msgs = bridge_server.build_messages(
+            "confirm",
+            {"source": "coder", "grok_draft": "maybe four"},
+        )
+        roles = [m["role"] for m in msgs]
+        self.assertEqual(roles[0], "system")
+        self.assertEqual(roles[-1], "user")
+        # Extra system note with draft
+        mid = [m for m in msgs[1:-1] if m["role"] == "system"]
+        self.assertTrue(mid)
+        self.assertIn("maybe four", mid[0]["content"])
+        self.assertIn("coder", mid[0]["content"])
+
+    def test_health_endpoint(self) -> None:
+        import bridge_server
+        from unittest.mock import patch
+
+        with patch.dict("os.environ", {"JARVIS_BRIDGE_PORT": "0"}, clear=False):
+            # port 0 → OS picks a free port
+            server = bridge_server.create_server(port=0, log=lambda *_: None)
+        host, port = server.server_address
+        t = __import__("threading").Thread(target=server.serve_forever, daemon=True)
+        t.start()
+        try:
+            import urllib.request
+
+            with urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=2) as r:
+                body = r.read().decode()
+            self.assertEqual(body, '{"ok": true}')
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_chat_handler_mocked(self) -> None:
+        import bridge_server
+        import json
+        import urllib.request
+        from unittest.mock import patch
+
+        def fake_run_turn(client, model, messages, on_token=None):  # noqa: ARG001
+            return messages + [{"role": "assistant", "content": "four"}], "four"
+
+        with patch("jarvis.run_turn", side_effect=fake_run_turn):
+            server = bridge_server.create_server(port=0, log=lambda *_: None)
+            host, port = server.server_address
+            t = __import__("threading").Thread(target=server.serve_forever, daemon=True)
+            t.start()
+            try:
+                req = urllib.request.Request(
+                    f"http://127.0.0.1:{port}/chat",
+                    data=json.dumps({"message": "2+2", "context": {"source": "test"}}).encode(),
+                    method="POST",
+                    headers={"Content-Type": "application/json"},
+                )
+                with urllib.request.urlopen(req, timeout=5) as r:
+                    data = json.loads(r.read().decode())
+                self.assertEqual(data, {"reply": "four"})
+            finally:
+                server.shutdown()
+                server.server_close()
+
+    def test_chat_requires_message(self) -> None:
+        import bridge_server
+
+        with self.assertRaises(ValueError):
+            bridge_server.handle_chat({})
+
+    def test_auth_optional(self) -> None:
+        import bridge_server
+        import json
+        import urllib.error
+        import urllib.request
+        from unittest.mock import patch
+
+        def fake_run_turn(client, model, messages, on_token=None):  # noqa: ARG001
+            return messages, "ok"
+
+        with patch.dict("os.environ", {"JARVIS_API_KEY": "secret-test"}, clear=False):
+            with patch("jarvis.run_turn", side_effect=fake_run_turn):
+                server = bridge_server.create_server(port=0, log=lambda *_: None)
+                port = server.server_address[1]
+                t = __import__("threading").Thread(target=server.serve_forever, daemon=True)
+                t.start()
+                try:
+                    # no auth → 401
+                    req = urllib.request.Request(
+                        f"http://127.0.0.1:{port}/chat",
+                        data=json.dumps({"message": "hi"}).encode(),
+                        method="POST",
+                        headers={"Content-Type": "application/json"},
+                    )
+                    with self.assertRaises(urllib.error.HTTPError) as cm:
+                        urllib.request.urlopen(req, timeout=5)
+                    self.assertEqual(cm.exception.code, 401)
+
+                    # with auth → ok
+                    req2 = urllib.request.Request(
+                        f"http://127.0.0.1:{port}/chat",
+                        data=json.dumps({"message": "hi"}).encode(),
+                        method="POST",
+                        headers={
+                            "Content-Type": "application/json",
+                            "Authorization": "Bearer secret-test",
+                        },
+                    )
+                    with urllib.request.urlopen(req2, timeout=5) as r:
+                        data = json.loads(r.read().decode())
+                    self.assertEqual(data["reply"], "ok")
+                finally:
+                    server.shutdown()
+                    server.server_close()
+
+    def test_coder_client_demo(self) -> None:
+        import coder_jarvis_bridge
+
+        code = coder_jarvis_bridge.main(["--demo", "ping"])
+        self.assertEqual(code, 0)
+
+
+
 if __name__ == "__main__":
     unittest.main()

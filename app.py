@@ -36,6 +36,7 @@ from PyQt6.QtWidgets import (
 
 import jarvis as brain
 from jarvis import ensure_model, run_turn, warmup_model
+from bridge_server import start_bridge_in_thread
 from hud_widgets import (
     CaptionStack,
     HUD_STYLESHEET,
@@ -568,6 +569,11 @@ def main() -> None:
     _debug_log(
         f"JARVIS starting pid={os.getpid()} platform={sys.platform} "
         f"python={sys.version.split()[0]} log={_DEBUG_LOG}"
+    )
+    # Localhost HTTP bridge for Coder / CLI clients (JARVIS_BRIDGE=0 to disable).
+    start_bridge_in_thread(
+        model=os.environ.get("OLLAMA_MODEL"),
+        log=lambda msg, exc=None: _debug_log(msg, exc),
     )
     if sys.platform != "darwin" and not os.environ.get("ELEVENLABS_API_KEY"):
         print("Note: TTS uses ElevenLabs (set ELEVENLABS_API_KEY) or macOS `say`.")
