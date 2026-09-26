@@ -454,11 +454,49 @@ class ToolSmokeTests(unittest.TestCase):
     def test_chitchat_hi_still_fast(self) -> None:
         self.assertTrue(jarvis.is_chitchat("hi"))
         self.assertTrue(jarvis.is_chitchat("thanks"))
+        self.assertTrue(jarvis.should_skip_tools("hi"))
 
     def test_briefing_phrases_not_chitchat(self) -> None:
         self.assertFalse(jarvis.is_chitchat("good morning"))
         self.assertFalse(jarvis.is_chitchat("brief me"))
         self.assertFalse(jarvis.is_chitchat("status report"))
+        self.assertFalse(jarvis.should_skip_tools("good morning"))
+        self.assertFalse(jarvis.should_skip_tools("brief me"))
+
+    def test_personal_memory_questions_skip_tools(self) -> None:
+        for phrase in (
+            "what's my name",
+            "what is my name",
+            "who am i",
+            "where do I live",
+            "what do you know about me",
+            "what do you remember about me",
+            "what are my preferences",
+            "what's my favorite color",
+            "do you remember me",
+        ):
+            self.assertTrue(
+                jarvis.is_personal_memory_question(phrase),
+                msg=phrase,
+            )
+            self.assertTrue(jarvis.should_skip_tools(phrase), msg=phrase)
+            self.assertFalse(jarvis.is_chitchat(phrase), msg=phrase)
+
+    def test_memory_search_and_actions_keep_tools(self) -> None:
+        for phrase in (
+            "remember that my name is Jonas",
+            "forget my name",
+            "list memories",
+            "recall helsinki",
+            "what do you remember about the project",
+            "what's my clipboard",
+            "open safari",
+        ):
+            self.assertFalse(
+                jarvis.is_personal_memory_question(phrase),
+                msg=phrase,
+            )
+            self.assertFalse(jarvis.should_skip_tools(phrase), msg=phrase)
 
 
 

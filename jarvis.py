@@ -56,14 +56,16 @@ notify, create_reminder, music_control, take_screenshot, list_running_apps, read
 calendar_events, volume_control, start_timer, list_timers, fetch_url, stock_quote, dark_mode,
 daily_briefing, remember, recall, list_memories, forget.
 
-Long-term memory: each turn includes a "## Long-term memory" system note with known facts. Call
-remember when the user states lasting preferences/facts ("my name is", "I prefer", "remember that",
-projects, people, routines). Call recall to search memory when useful; list_memories / forget when
-asked. Never invent memories — only use the injected list and tool results.
+Long-term memory: each turn includes a "## Long-term memory" system note with known facts.
+Answer personal questions (name, home, preferences, "what do you know about me") directly from that
+injected list — do not call recall unless you need to search/filter for something not clearly in it.
+Call remember when the user states lasting preferences/facts ("my name is", "I prefer", "remember that",
+projects, people, routines). Call list_memories / forget when asked. Never invent memories — only use
+the injected list and tool results.
 
 When the user says good morning / brief me / status report (or similar), call daily_briefing and
-narrate the structured result — do not invent the briefing. Pure hi/thanks chitchat → plain text,
-no tools (memory is still injected so you can greet by name if known). Only tool-call for actions
+narrate the structured result — do not invent the briefing. Pure hi/thanks chitchat and short
+personal-fact questions → plain text, no tools (memory is still injected). Only tool-call for actions
 or live data.
 
 Answer factual/historical questions neutrally. Refuse only requests for harm, crime, or illegal/
@@ -2088,6 +2090,26 @@ _BRIEFING_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Short personal-fact questions answerable from the injected ## Long-term memory block.
+# End-anchored so "what do you remember about <topic>" still gets tools (recall/search).
+_PERSONAL_MEMORY_RE = re.compile(
+    r"^(?:"
+    r"what(?:'s|s| is)\s+my\s+(?:full\s+)?name|"
+    r"do you know my name|"
+    r"who am i|"
+    r"where (?:do i live|am i from)|"
+    r"what(?:'s|s| is)\s+my\s+(?:city|town|location|address|home(?:town)?|"
+    r"preferences?|favorite\s+\w{2,20}|timezone|birthday|job|age)|"
+    r"what(?:'s|s| are| is)\s+my\s+preferences?|"
+    r"what do i prefer|"
+    r"what do you (?:know|remember)(?: about me)?|"
+    r"what have you remembered|"
+    r"tell me what you (?:know|remember) about me|"
+    r"do you remember(?: me| my name)?"
+    r")[\s!.?]*$",
+    re.IGNORECASE,
+)
+
 
 def is_chitchat(text: str) -> bool:
     """Short greetings/thanks — skip tools for a faster Ollama round-trip.
@@ -2102,6 +2124,24 @@ def is_chitchat(text: str) -> bool:
     return bool(_CHITCHAT_RE.match(t))
 
 
+def is_personal_memory_question(text: str) -> bool:
+    """Short personal-fact asks answerable from injected long-term memory (no tools).
+
+    When in doubt, returns False so actionable/search turns still get tool schemas.
+    """
+    t = (text or "").strip()
+    if not t or len(t) > 60:
+        return False
+    if _BRIEFING_RE.match(t):
+        return False
+    return bool(_PERSONAL_MEMORY_RE.match(t))
+
+
+def should_skip_tools(text: str) -> bool:
+    """True when this user turn can use the lean no-tools Ollama path."""
+    return is_chitchat(text) or is_personal_memory_question(text)
+
+
 def chat_round(
     client: httpx.Client,
     model: str,
@@ -2114,6 +2154,11 @@ def chat_round(
         "model": model,
         "messages": messages,
         "stream": False,
+        # Keep the model loaded between turns; cap tokens on lean (no-tools) replies.
+        "keep_alive": "30m",
+        "options": {
+            "num_predict": 128 if not use_tools else 512,
+        },
     }
     if use_tools:
         payload["tools"] = TOOLS
@@ -2160,8 +2205,8 @@ def run_turn(
 ) -> tuple[list[dict[str, Any]], str]:
     """Run tool rounds until assistant returns text or cap hit.
 
-    Short greetings/chitchat skip the tools schema for a faster single round-trip,
-    but long-term memory is still injected so greetings can use known facts (e.g. name).
+    Short greetings/chitchat and personal-fact questions skip the tools schema for a
+    faster single round-trip; long-term memory is still injected so answers can use known facts.
     """
     # Refresh sticky memory system message before each model call path.
     state = memory_store.inject_memory_messages(messages)
@@ -2169,7 +2214,7 @@ def run_turn(
     use_tools = True
     for m in reversed(state):
         if m.get("role") == "user":
-            use_tools = not is_chitchat(str(m.get("content") or ""))
+            use_tools = not should_skip_tools(str(m.get("content") or ""))
             break
 
     rounds = 1 if not use_tools else MAX_TOOL_ROUNDS

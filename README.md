@@ -25,7 +25,7 @@ python app.py
 
 The window is a frameless **cinematic HUD** (default ~1180×740). Status strip uses `SYS // OLLAMA READY`, `SYS // SYNTHESIZING` (waiting on Ollama), `SYS // SPEAKING` (TTS playing), `SYS // LISTENING`. Left side is a multi-layer pulse/radar; right side stacks transcript + transmit bar. Telemetry shows `EL REQ // N` whenever TTS/`speak_async` is invoked. Startup fails fast if the model is missing (suggests `ollama pull …`).
 
-Short greetings/chitchat (≤40 chars) skip the tools schema for a faster single Ollama round-trip (memory is still injected); real asks still get tools.
+Short greetings/chitchat (≤40 chars) and short personal-fact questions (name, home, preferences, “what do you know about me”) skip the tools schema for a faster single Ollama round-trip (memory is still injected); real asks still get tools. Lean calls use `keep_alive=30m` and a lower `num_predict`.
 
 ### CLI (secondary)
 
