@@ -29,7 +29,7 @@ from PyQt6.QtWidgets import (
 )
 
 import jarvis as brain
-from jarvis import run_turn
+from jarvis import ensure_model, run_turn
 
 try:
     import sounddevice as sd
@@ -230,7 +230,9 @@ class JarvisWindow(QMainWindow):
         row.addWidget(self._mic_btn)
         layout.addLayout(row)
 
-        foot = QLabel(f"Notes: {brain.NOTES_DIR}")
+        foot = QLabel(
+            f"Notes: {brain.NOTES_DIR}  ·  CLI: python jarvis.py  ·  quit with window close"
+        )
         foot.setFont(QFont("Menlo", 10))
         foot.setStyleSheet("color: #8b92a8;")
         layout.addWidget(foot)
@@ -246,7 +248,6 @@ class JarvisWindow(QMainWindow):
         try:
             r = self._client.get(f"{brain.OLLAMA_HOST}/api/tags", timeout=5.0)
             r.raise_for_status()
-            self._set_status(f"Ollama ready · {brain.OLLAMA_HOST}")
         except Exception as e:  # noqa: BLE001
             self._set_status(f"Cannot reach Ollama ({brain.OLLAMA_HOST}) — {e}")
             QMessageBox.warning(
@@ -254,6 +255,25 @@ class JarvisWindow(QMainWindow):
                 "JARVIS",
                 "Start Ollama first:\n  brew services start ollama",
             )
+            return
+
+        try:
+            ensure_model(self._client, self._model)
+        except SystemExit:
+            pull = f"ollama pull {self._model}"
+            self._set_status(f"Model missing · {self._model}")
+            QMessageBox.critical(
+                self,
+                "JARVIS — model not found",
+                (
+                    f"Model {self._model!r} is not installed in Ollama.\n\n"
+                    f"Pull it with:\n  {pull}\n\n"
+                    "Or set another model via OLLAMA_MODEL / the Model field."
+                ),
+            )
+            return
+
+        self._set_status(f"Desktop · local Ollama · {brain.OLLAMA_HOST}")
 
     def _append_chat(self, who: str, text: str) -> None:
         self._chat.append(f"{who}: {text}")
@@ -284,7 +304,7 @@ class JarvisWindow(QMainWindow):
         self._busy = False
         self._send_btn.setEnabled(True)
         self._append_chat("JARVIS", reply)
-        self._set_status(f"Ready · {self._model}")
+        self._set_status(f"Desktop · local Ollama · {self._model}")
         if self._auto_speak.isChecked() and speak_async:
             speak_async(reply)
 

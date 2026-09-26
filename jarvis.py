@@ -34,7 +34,11 @@ GitHub data, or command output.
 You can open http(s) URLs in the default browser (open_url), launch macOS apps by name (open_app),
 read/write the system clipboard (get_clipboard / set_clipboard), fetch live weather for a city
 (get_weather), and summarize open GitHub PRs authored by or awaiting review from the user
-(github_status). Always use these tools; never fabricate their results.
+(github_status). When you need those capabilities, call the tools — never fabricate their results.
+
+For simple greetings and chitchat (e.g. "hi", "hello", "how are you"), reply in plain text
+without calling tools. Only call tools when the user asks for an action or real-world data
+(time, notes, browser, apps, clipboard, weather, GitHub, etc.).
 
 Answer factual questions directly. Straightforward history, dates, geography, and well-documented public events
 (including conflicts, wars, and historical figures) are normal reference topics: give neutral, encyclopedia-style
@@ -591,6 +595,43 @@ def run_tool(name: str, arguments: Any) -> str:
         return json.dumps({"error": str(e)})
 
 
+def ensure_model(client: httpx.Client, model: str) -> None:
+    """Fail fast if the configured model is not present in Ollama.
+
+    Ollama returns names like ``llama3.1:8b``. Matching rules:
+    - exact name match, or
+    - wanted has no tag (``llama3.1``) and an available name is that base or ``base:…``, or
+    - available has no tag and equals the wanted base.
+    """
+    r = client.get(f"{OLLAMA_HOST}/api/tags", timeout=5.0)
+    r.raise_for_status()
+    data = r.json()
+    names = [m.get("name", "") for m in (data.get("models") or []) if isinstance(m, dict) and m.get("name")]
+
+    def matches(available: str, wanted: str) -> bool:
+        if available == wanted:
+            return True
+        avail_base, _, avail_tag = available.partition(":")
+        want_base, _, want_tag = wanted.partition(":")
+        if not want_tag and (available == wanted or avail_base == wanted):
+            return True
+        if not avail_tag and available == want_base:
+            return True
+        return False
+
+    if any(matches(n, model) for n in names):
+        return
+
+    print(
+        f"Model not found in Ollama: {model!r}\n"
+        f"  Pull it with:  ollama pull {model}\n"
+        f"  Or set another model:  OLLAMA_MODEL=<name>\n"
+        f"  Available: {', '.join(names) if names else '(none)'}",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+
+
 def chat_round(
     client: httpx.Client, model: str, messages: list[dict[str, Any]]
 ) -> tuple[list[dict[str, Any]], str | None]:
@@ -603,7 +644,7 @@ def chat_round(
             "tools": TOOLS,
             "stream": False,
         },
-        timeout=600.0,
+        timeout=180.0,
     )
     r.raise_for_status()
     data = r.json()
@@ -672,6 +713,8 @@ def main() -> None:
             print("Start it with: brew services start ollama", file=sys.stderr)
             sys.exit(1)
 
+        ensure_model(client, model)
+
         while True:
             try:
                 line = input("You › ").strip()
@@ -693,7 +736,22 @@ def main() -> None:
                 continue
 
             messages.append({"role": "user", "content": line})
-            messages, reply = run_turn(client, model, messages)
+            print("JARVIS › Thinking…", flush=True)
+            try:
+                messages, reply = run_turn(client, model, messages)
+            except httpx.TimeoutException:
+                print(
+                    "JARVIS › (Timed out waiting for Ollama — is the model loaded? try again)\n",
+                    flush=True,
+                )
+                if messages and messages[-1].get("role") == "user":
+                    messages.pop()
+                continue
+            except httpx.HTTPError as e:
+                print(f"JARVIS › (Ollama error: {e})\n", flush=True)
+                if messages and messages[-1].get("role") == "user":
+                    messages.pop()
+                continue
             # `messages` already includes the final assistant message from the API turn
             print(f"JARVIS › {reply}\n")
 
