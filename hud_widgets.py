@@ -1,14 +1,17 @@
-"""JARVIS HUD — luminous soft-glow orb. Present, clean, no busy chrome."""
+"""JARVIS HUD — floating neural brain. Synapses light when speaking."""
 
 from __future__ import annotations
 
 import math
+import random
+from dataclasses import dataclass, field
 
 from PyQt6.QtCore import QPoint, QPointF, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import (
     QColor,
     QMouseEvent,
     QPainter,
+    QPainterPath,
     QPen,
     QRadialGradient,
 )
@@ -156,10 +159,8 @@ class HudRoot(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         w, h = self.width(), self.height()
-        # Deep slate base (readable, not a void)
         painter.fillRect(0, 0, w, h, QColor(C_BG))
 
-        # Soft radial ambient — seats the orb in light
         haze = QRadialGradient(QPointF(w / 2.0, h * 0.40), max(w, h) * 0.58)
         haze.setColorAt(0.0, QColor(28, 70, 95, 72))
         haze.setColorAt(0.35, QColor(16, 42, 62, 38))
@@ -167,14 +168,12 @@ class HudRoot(QWidget):
         haze.setColorAt(1.0, QColor(0, 0, 0, 0))
         painter.fillRect(0, 0, w, h, haze)
 
-        # Subtle cool fill lift across the whole field
         lift = QRadialGradient(QPointF(w / 2.0, h * 0.55), max(w, h) * 0.95)
         lift.setColorAt(0.0, QColor(18, 36, 52, 28))
         lift.setColorAt(0.55, QColor(12, 22, 34, 12))
         lift.setColorAt(1.0, QColor(0, 0, 0, 0))
         painter.fillRect(0, 0, w, h, lift)
 
-        # Gentle edge vignette (not crushing black)
         vig = QRadialGradient(QPointF(w / 2.0, h / 2.0), max(w, h) * 0.88)
         vig.setColorAt(0.0, QColor(0, 0, 0, 0))
         vig.setColorAt(0.72, QColor(0, 0, 0, 0))
@@ -257,7 +256,7 @@ class StatusStrip(QWidget):
 
 
 class StatusChip(QWidget):
-    """Compat shim — status is silent (orb brightness only).
+    """Compat shim — status is silent (brain activity only).
 
     Always expects a parent. If constructed without one, stay hidden and
     attribute-less so we never spawn a rogue top-level focus window.
@@ -287,7 +286,7 @@ class StatusChip(QWidget):
 
 
 class CaptionStack(QWidget):
-    """Fading reply caption under the orb — soft text only, no frame."""
+    """Fading reply caption under the brain — soft text only, no frame."""
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -357,8 +356,159 @@ class CaptionStack(QWidget):
         )
 
 
+# ── Procedural neural brain ──────────────────────────────────────────────
+
+
+@dataclass
+class _Node:
+    x: float
+    y: float
+    z: float
+    r: float
+    flash: float = 0.0
+
+
+@dataclass
+class _Edge:
+    a: int
+    b: int
+    curl: float  # control-point offset for curved axon
+
+
+@dataclass
+class _Pulse:
+    edge: int
+    t: float  # 0..1 along axon
+    speed: float
+    bright: float
+
+
+@dataclass
+class _BrainGraph:
+    nodes: list[_Node] = field(default_factory=list)
+    edges: list[_Edge] = field(default_factory=list)
+
+
+def _in_brain(x: float, y: float, z: float) -> bool:
+    """Stylized two-hemisphere brain volume (unit-ish coords)."""
+    # Longitudinal fissure — slight gap on midline
+    ax = abs(x)
+    # Main ellipsoid per hemisphere, shifted outward
+    hx = ax - 0.22
+    # Upper cortex bulge
+    cortex = (hx * hx) / (0.72 * 0.72) + (y * y) / (0.55 * 0.55) + (z * z) / (0.48 * 0.48)
+    if cortex > 1.0:
+        # Allow a softer lower brainstem / cerebellum bump
+        stem = (x * x) / (0.28 * 0.28) + ((y + 0.42) ** 2) / (0.32 * 0.32) + (z * z) / (0.28 * 0.28)
+        if stem > 1.0:
+            return False
+    # Flatten underside a touch (not a perfect ball)
+    if y < -0.55:
+        return False
+    # Keep midline cleft except near bottom (corpus-ish bridge)
+    if ax < 0.06 and y > -0.15:
+        return False
+    return True
+
+
+def _build_brain(seed: int = 42) -> _BrainGraph:
+    rng = random.Random(seed)
+    nodes: list[_Node] = []
+
+    # Rejection-sample nodes inside brain volume
+    attempts = 0
+    while len(nodes) < 78 and attempts < 4000:
+        attempts += 1
+        x = rng.uniform(-1.05, 1.05)
+        y = rng.uniform(-0.72, 0.72)
+        z = rng.uniform(-0.7, 0.7)
+        if not _in_brain(x, y, z):
+            continue
+        # Prefer cortex surface — push outward a bit
+        if rng.random() < 0.55:
+            nrm = math.sqrt(x * x + y * y + z * z) or 1.0
+            push = 0.08 + rng.random() * 0.12
+            x *= 1.0 + push / nrm
+            y *= 1.0 + push / nrm * 0.85
+            z *= 1.0 + push / nrm
+            if not _in_brain(x * 0.92, y * 0.92, z * 0.92):
+                # still accept slightly outside for silhouette
+                pass
+        # Spacing: skip if too close to existing
+        too_close = False
+        for n in nodes:
+            dx, dy, dz = n.x - x, n.y - y, n.z - z
+            if dx * dx + dy * dy + dz * dz < 0.045:
+                too_close = True
+                break
+        if too_close:
+            continue
+        nodes.append(_Node(x=x, y=y, z=z, r=0.028 + rng.random() * 0.022))
+
+    # Guaranteed silhouette anchors (left / right lobes + stem)
+    anchors = [
+        (-0.55, 0.15, 0.1),
+        (0.55, 0.15, 0.1),
+        (-0.7, -0.05, 0.0),
+        (0.7, -0.05, 0.0),
+        (-0.4, 0.4, 0.15),
+        (0.4, 0.4, 0.15),
+        (-0.25, -0.35, 0.05),
+        (0.25, -0.35, 0.05),
+        (0.0, -0.5, 0.0),
+        (-0.15, 0.05, 0.35),
+        (0.15, 0.05, 0.35),
+        (-0.15, 0.05, -0.35),
+        (0.15, 0.05, -0.35),
+    ]
+    for ax, ay, az in anchors:
+        nodes.append(_Node(x=ax, y=ay, z=az, r=0.04))
+
+    # k-NN edges + a few long-range commissural links
+    edges: list[_Edge] = []
+    seen: set[tuple[int, int]] = set()
+    k = 4
+    for i, ni in enumerate(nodes):
+        dists: list[tuple[float, int]] = []
+        for j, nj in enumerate(nodes):
+            if i == j:
+                continue
+            dx, dy, dz = ni.x - nj.x, ni.y - nj.y, ni.z - nj.z
+            dists.append((dx * dx + dy * dy + dz * dz, j))
+        dists.sort()
+        for _, j in dists[:k]:
+            a, b = (i, j) if i < j else (j, i)
+            if (a, b) in seen:
+                continue
+            # Prefer same-hemisphere local wiring; allow some cross
+            if nodes[a].x * nodes[b].x < 0 and abs(nodes[a].x) > 0.15 and abs(nodes[b].x) > 0.15:
+                if rng.random() > 0.22:
+                    continue
+            seen.add((a, b))
+            edges.append(_Edge(a=a, b=b, curl=rng.uniform(-0.35, 0.35)))
+
+    # Explicit corpus callosum bridges
+    left = [i for i, n in enumerate(nodes) if n.x < -0.12]
+    right = [i for i, n in enumerate(nodes) if n.x > 0.12]
+    for _ in range(10):
+        if not left or not right:
+            break
+        a = rng.choice(left)
+        b = rng.choice(right)
+        key = (a, b) if a < b else (b, a)
+        if key in seen:
+            continue
+        # Prefer similar y
+        if abs(nodes[a].y - nodes[b].y) > 0.35:
+            continue
+        seen.add(key)
+        edges.append(_Edge(a=a, b=b, curl=rng.uniform(-0.2, 0.2)))
+
+    return _BrainGraph(nodes=nodes, edges=edges)
+
+
 class OrbVisualizer(QWidget):
-    """Present circle of light — brighter cyan/white glow, soft bloom, one glass rim.
+    """Floating procedural neural brain — synapses light on talk.
 
     Hold-click (or Space from parent) drives listening. States:
     idle / listening / thinking / speaking.
@@ -382,45 +532,83 @@ class OrbVisualizer(QWidget):
 
         self._state = self.IDLE
         self._phase = 0.0
+        self._yaw = 0.0
+        self._bob = 0.0
         self._holding = False
+        self._graph = _build_brain(42)
+        self._pulses: list[_Pulse] = []
+        self._spawn_acc = 0.0
+        self._rng = random.Random(7)
 
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._tick)
-        self._timer.start(40)  # ~25 fps — enough for soft pulse
+        self._timer.start(16)  # ~60 fps
 
     def set_state(self, state: str) -> None:
         self._state = state or self.IDLE
         self.update()
 
+    def _activity(self) -> tuple[float, float, float]:
+        """Return (spawn_rate, pulse_speed, node_glow) by state."""
+        if self._state == self.SPEAKING:
+            return 4.2, 1.35, 1.0
+        if self._state == self.LISTENING:
+            return 2.6, 1.05, 0.85
+        if self._state == self.THINKING:
+            return 3.4, 1.2, 0.92
+        return 0.55, 0.55, 0.45
+
     def _tick(self) -> None:
-        speed = {
-            self.IDLE: 0.028,
-            self.LISTENING: 0.055,
-            self.THINKING: 0.09,
-            self.SPEAKING: 0.07,
-        }.get(self._state, 0.028)
-        self._phase = (self._phase + speed) % (math.pi * 2)
+        dt = 0.016
+        # Gentle idle spin + bob
+        spin = {
+            self.IDLE: 0.18,
+            self.LISTENING: 0.28,
+            self.THINKING: 0.42,
+            self.SPEAKING: 0.55,
+        }.get(self._state, 0.18)
+        self._yaw = (self._yaw + spin * dt) % (math.pi * 2)
+        self._phase = (self._phase + dt) % (math.pi * 2)
+        self._bob = math.sin(self._phase * 0.7) * 0.035
+
+        spawn_rate, pulse_speed, _ = self._activity()
+        self._spawn_acc += spawn_rate * dt
+        while self._spawn_acc >= 1.0 and self._graph.edges:
+            self._spawn_acc -= 1.0
+            ei = self._rng.randrange(len(self._graph.edges))
+            self._pulses.append(
+                _Pulse(
+                    edge=ei,
+                    t=0.0,
+                    speed=pulse_speed * (0.75 + self._rng.random() * 0.55),
+                    bright=0.7 + self._rng.random() * 0.3,
+                )
+            )
+            # Flash endpoints lightly
+            e = self._graph.edges[ei]
+            self._graph.nodes[e.a].flash = max(self._graph.nodes[e.a].flash, 0.7)
+            self._graph.nodes[e.b].flash = max(self._graph.nodes[e.b].flash, 0.55)
+
+        # Cap pulse count for perf
+        if len(self._pulses) > 48:
+            self._pulses = self._pulses[-48:]
+
+        alive: list[_Pulse] = []
+        for p in self._pulses:
+            p.t += p.speed * dt * 0.85
+            if p.t < 1.0:
+                alive.append(p)
+            else:
+                e = self._graph.edges[p.edge]
+                self._graph.nodes[e.b].flash = max(self._graph.nodes[e.b].flash, p.bright)
+        self._pulses = alive
+
+        # Decay node flashes
+        decay = 2.8 * dt
+        for n in self._graph.nodes:
+            n.flash = max(0.0, n.flash - decay)
+
         self.update()
-
-    def _intensity(self) -> float:
-        """Base brightness multiplier by state — idle stays visibly alive."""
-        if self._state == self.LISTENING:
-            return 1.32
-        if self._state == self.THINKING:
-            return 1.18
-        if self._state == self.SPEAKING:
-            return 1.25
-        return 0.96
-
-    def _pulse(self) -> float:
-        if self._state == self.THINKING:
-            return 0.84 + 0.16 * abs(math.sin(self._phase * 1.6))
-        if self._state == self.SPEAKING:
-            return 0.78 + 0.22 * abs(math.sin(self._phase * 2.2))
-        if self._state == self.LISTENING:
-            return 0.90 + 0.10 * abs(math.sin(self._phase * 1.1))
-        # Clearer idle breathe — present without decoration
-        return 0.82 + 0.18 * (0.5 + 0.5 * math.sin(self._phase))
 
     # —— Interaction ——
     def mousePressEvent(self, event: QMouseEvent) -> None:  # noqa: N802
@@ -441,7 +629,7 @@ class OrbVisualizer(QWidget):
 
     def paintEvent(self, event) -> None:  # noqa: N802, ARG002
         try:
-            self._paint_orb(event)
+            self._paint_brain(event)
         except Exception as exc:  # noqa: BLE001
             try:
                 import traceback
@@ -457,91 +645,192 @@ class OrbVisualizer(QWidget):
             except Exception:  # noqa: BLE001
                 pass
 
-    def _paint_orb(self, event) -> None:  # noqa: ARG002
+    def _project(self, x: float, y: float, z: float, cx: float, cy: float, scale: float) -> tuple[float, float, float]:
+        """Yaw rotation + slight tilt → screen xy + depth weight."""
+        cyaw, syaw = math.cos(self._yaw), math.sin(self._yaw)
+        # yaw around Y
+        xr = x * cyaw - z * syaw
+        zr = x * syaw + z * cyaw
+        yr = y + self._bob
+        # slight pitch (~18°) for 3D read
+        pitch = 0.32
+        cp, sp = math.cos(pitch), math.sin(pitch)
+        y2 = yr * cp - zr * sp
+        z2 = yr * sp + zr * cp
+        # perspective foreshortening
+        persp = 1.0 / (1.0 + z2 * 0.22)
+        sx = cx + xr * scale * persp
+        sy = cy + y2 * scale * persp
+        depth = 0.5 + 0.5 * z2  # ~0..1 frontness
+        return sx, sy, depth
+
+    def _axon_points(
+        self, ax: float, ay: float, az: float, bx: float, by: float, bz: float, curl: float
+    ) -> tuple[tuple[float, float, float], tuple[float, float, float], tuple[float, float, float]]:
+        """Start, control, end in local brain space for a curved axon."""
+        mx = (ax + bx) * 0.5
+        my = (ay + by) * 0.5
+        mz = (az + bz) * 0.5
+        # Perp offset in XY for curl
+        dx, dy = bx - ax, by - ay
+        length = math.sqrt(dx * dx + dy * dy) or 1.0
+        px, py = -dy / length, dx / length
+        # Lift control toward outer cortex
+        lift = 0.08 + abs(curl) * 0.12
+        cx_ = mx + px * curl * 0.45
+        cy_ = my + py * curl * 0.45 + lift
+        cz_ = mz + curl * 0.15
+        return (ax, ay, az), (cx_, cy_, cz_), (bx, by, bz)
+
+    def _bezier(self, p0, p1, p2, t: float) -> tuple[float, float, float]:
+        u = 1.0 - t
+        return (
+            u * u * p0[0] + 2 * u * t * p1[0] + t * t * p2[0],
+            u * u * p0[1] + 2 * u * t * p1[1] + t * t * p2[1],
+            u * u * p0[2] + 2 * u * t * p1[2] + t * t * p2[2],
+        )
+
+    def _paint_brain(self, event) -> None:  # noqa: ARG002
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         w, h = self.width(), self.height()
-        cx, cy = w / 2.0, h / 2.0
-        # Slightly larger presence than the quiet pass
-        radius = min(w, h) * 0.32
+        cx, cy = w / 2.0, h / 2.0 - h * 0.02
+        scale = min(w, h) * 0.38
 
-        intensity = self._intensity()
-        pulse = self._pulse()
-        scale = min(1.4, intensity * pulse)
+        _, _, glow_mul = self._activity()
+        breathe = 0.88 + 0.12 * (0.5 + 0.5 * math.sin(self._phase * 1.1))
+        intensity = glow_mul * breathe
 
-        # Soft outer blooms — stronger presence, still clean
+        # Soft volumetric aura — brain-shaped glow (not a hard circle blob)
         painter.setPen(Qt.PenStyle.NoPen)
         for bloom_r, bloom_a in (
-            (radius * 2.55, 28),
-            (radius * 2.05, 48),
-            (radius * 1.55, 78),
-            (radius * 1.18, 115),
+            (scale * 1.55, 22),
+            (scale * 1.15, 40),
+            (scale * 0.85, 58),
         ):
             glow = QRadialGradient(QPointF(cx, cy), bloom_r)
-            c0 = QColor(122, 232, 255)
-            c0.setAlpha(_a(bloom_a * scale))
-            c1 = QColor(122, 232, 255)
-            c1.setAlpha(_a(bloom_a * 0.22 * scale))
+            c0 = QColor(90, 200, 230)
+            c0.setAlpha(_a(bloom_a * intensity))
+            c1 = QColor(60, 140, 180)
+            c1.setAlpha(_a(bloom_a * 0.25 * intensity))
             glow.setColorAt(0.0, c0)
-            glow.setColorAt(0.55, c1)
+            glow.setColorAt(0.45, c1)
             glow.setColorAt(1.0, QColor(0, 0, 0, 0))
             painter.setBrush(glow)
-            painter.drawEllipse(QPointF(cx, cy), bloom_r, bloom_r)
+            # Slightly wider than tall — brain mass
+            painter.drawEllipse(QPointF(cx, cy), bloom_r * 1.15, bloom_r * 0.92)
 
-        # Soft glass body — brighter core wash
-        body_r = radius * 0.74
-        glass = QRadialGradient(QPointF(cx - body_r * 0.12, cy - body_r * 0.18), body_r * 1.15)
-        glass.setColorAt(0.0, QColor(200, 246, 255, _a(95 * scale)))
-        glass.setColorAt(0.22, QColor(70, 150, 185, _a(100 * scale)))
-        glass.setColorAt(0.5, QColor(18, 48, 68, _a(175)))
-        glass.setColorAt(0.82, QColor(8, 22, 36, _a(210)))
-        glass.setColorAt(1.0, QColor(122, 232, 255, _a(55 * scale)))
+        # Soft glass volume fill (read as translucent brain mass)
+        glass = QRadialGradient(QPointF(cx - scale * 0.1, cy - scale * 0.15), scale * 0.95)
+        glass.setColorAt(0.0, QColor(140, 220, 240, _a(28 * intensity)))
+        glass.setColorAt(0.35, QColor(40, 90, 120, _a(55)))
+        glass.setColorAt(0.7, QColor(12, 30, 48, _a(70)))
+        glass.setColorAt(1.0, QColor(0, 0, 0, 0))
         painter.setBrush(glass)
-        painter.drawEllipse(QPointF(cx, cy), body_r, body_r)
+        painter.drawEllipse(QPointF(cx, cy), scale * 1.05, scale * 0.82)
 
-        # Specular highlight — one soft crescent
-        spec = QRadialGradient(
-            QPointF(cx - body_r * 0.25, cy - body_r * 0.3),
-            body_r * 0.52,
+        nodes = self._graph.nodes
+        edges = self._graph.edges
+
+        # Project all nodes once
+        proj: list[tuple[float, float, float]] = []
+        for n in nodes:
+            proj.append(self._project(n.x, n.y, n.z, cx, cy, scale))
+
+        # Draw axons back-to-front roughly by mid depth
+        edge_order = list(range(len(edges)))
+        edge_order.sort(
+            key=lambda i: (proj[edges[i].a][2] + proj[edges[i].b][2]) * 0.5
         )
-        spec.setColorAt(0.0, QColor(230, 250, 255, _a(75 * scale)))
-        spec.setColorAt(0.45, QColor(160, 220, 240, _a(22)))
-        spec.setColorAt(1.0, QColor(0, 0, 0, 0))
-        painter.setBrush(spec)
-        painter.drawEllipse(QPointF(cx, cy), body_r * 0.9, body_r * 0.9)
 
-        # ONE thin soft glass rim (not dashed / gold / mesh)
-        rim_a = _a((90 if self._state == self.IDLE else 130) * min(1.15, scale))
-        painter.setBrush(Qt.BrushStyle.NoBrush)
-        painter.setPen(QPen(_q(C_CYAN, rim_a), 1.35))
-        painter.drawEllipse(QPointF(cx, cy), body_r, body_r)
-        # Soft outer halo on the rim only
-        painter.setPen(QPen(_q(C_CYAN_GLOW, rim_a * 0.35), 2.4))
-        painter.drawEllipse(QPointF(cx, cy), body_r + 1.5, body_r + 1.5)
+        for ei in edge_order:
+            e = edges[ei]
+            na, nb = nodes[e.a], nodes[e.b]
+            p0, p1, p2 = self._axon_points(na.x, na.y, na.z, nb.x, nb.y, nb.z, e.curl)
+            # Sample quadratic for path
+            path = QPainterPath()
+            s0 = self._project(*p0, cx, cy, scale)
+            path.moveTo(s0[0], s0[1])
+            samples = 8
+            for s in range(1, samples + 1):
+                t = s / samples
+                bx, by, bz = self._bezier(p0, p1, p2, t)
+                sx, sy, _ = self._project(bx, by, bz, cx, cy, scale)
+                path.lineTo(sx, sy)
+            mid_d = (proj[e.a][2] + proj[e.b][2]) * 0.5
+            base_a = 28 + 50 * mid_d
+            # Active flash if either node lit
+            flash = max(na.flash, nb.flash)
+            base_a += flash * 90
+            base_a *= 0.55 + 0.45 * intensity
+            pen = QPen(_q(C_CYAN_SOFT, base_a), 1.15 + flash * 0.8)
+            pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+            painter.setPen(pen)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawPath(path)
 
-        # Hot soft core pip — brighter / more present
-        pip_r = 5.5 + 2.4 * pulse
-        pip_glow = QRadialGradient(QPointF(cx, cy), pip_r * 5.0)
-        pg = QColor(C_CYAN_GLOW)
-        pg.setAlpha(_a(230 * scale))
-        pip_glow.setColorAt(0.0, pg)
-        pip_glow.setColorAt(0.28, QColor(210, 248, 255, _a(160 * scale)))
-        pip_glow.setColorAt(0.6, QColor(122, 232, 255, _a(55 * scale)))
-        pip_glow.setColorAt(1.0, QColor(0, 0, 0, 0))
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(pip_glow)
-        painter.drawEllipse(QPointF(cx, cy), pip_r * 4.4, pip_r * 4.4)
+        # Traveling synapse pulses
+        for p in self._pulses:
+            e = edges[p.edge]
+            na, nb = nodes[e.a], nodes[e.b]
+            p0, p1, p2 = self._axon_points(na.x, na.y, na.z, nb.x, nb.y, nb.z, e.curl)
+            bx, by, bz = self._bezier(p0, p1, p2, p.t)
+            sx, sy, depth = self._project(bx, by, bz, cx, cy, scale)
+            # Soft trail behind pulse
+            for trail in (0.08, 0.04, 0.0):
+                tt = max(0.0, p.t - trail)
+                tx, ty, tz = self._bezier(p0, p1, p2, tt)
+                tsx, tsy, _ = self._project(tx, ty, tz, cx, cy, scale)
+                fade = 1.0 - trail * 8
+                pr = (3.2 + 2.2 * p.bright) * (0.7 + 0.3 * depth) * fade
+                g = QRadialGradient(QPointF(tsx, tsy), pr * 3.2)
+                core = QColor(200, 250, 255)
+                core.setAlpha(_a(220 * p.bright * intensity * fade))
+                mid = QColor(122, 232, 255)
+                mid.setAlpha(_a(110 * p.bright * intensity * fade))
+                g.setColorAt(0.0, core)
+                g.setColorAt(0.4, mid)
+                g.setColorAt(1.0, QColor(0, 0, 0, 0))
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.setBrush(g)
+                painter.drawEllipse(QPointF(tsx, tsy), pr * 2.8, pr * 2.8)
 
-        painter.setBrush(_q("#f4fdff", 250 * scale))
-        painter.drawEllipse(QPointF(cx, cy), pip_r * 0.5, pip_r * 0.5)
-        painter.setBrush(_q(C_CYAN_GLOW, 235 * scale))
-        painter.drawEllipse(QPointF(cx, cy), pip_r * 1.0, pip_r * 1.0)
+        # Nodes back-to-front
+        order = sorted(range(len(nodes)), key=lambda i: proj[i][2])
+        for i in order:
+            n = nodes[i]
+            sx, sy, depth = proj[i]
+            flash = n.flash
+            r = (n.r * scale * 0.55 + 1.6) * (0.85 + 0.25 * depth)
+            r *= 1.0 + flash * 0.55
+            # Halo
+            hr = r * (3.5 + flash * 2.5)
+            hg = QRadialGradient(QPointF(sx, sy), hr)
+            ha = (40 + flash * 140) * intensity * (0.6 + 0.4 * depth)
+            hg.setColorAt(0.0, QColor(180, 245, 255, _a(ha)))
+            hg.setColorAt(0.45, QColor(100, 210, 235, _a(ha * 0.35)))
+            hg.setColorAt(1.0, QColor(0, 0, 0, 0))
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(hg)
+            painter.drawEllipse(QPointF(sx, sy), hr, hr)
+            # Core
+            core_a = (120 + flash * 120) * (0.55 + 0.45 * intensity)
+            if flash > 0.2:
+                painter.setBrush(_q("#f0fcff", 230 * flash * intensity))
+            else:
+                painter.setBrush(QColor(100, 190, 220, _a(core_a)))
+            painter.drawEllipse(QPointF(sx, sy), r, r)
+            # Tiny hot pip when flashing
+            if flash > 0.35:
+                painter.setBrush(_q(C_CYAN_GLOW, 240 * flash))
+                painter.drawEllipse(QPointF(sx, sy), r * 0.45, r * 0.45)
 
         painter.end()
 
 
-# Back-compat alias
+# Back-compat aliases
 PulseRing = OrbVisualizer
+BrainWidget = OrbVisualizer
 
 
 class HoloPanel(QWidget):

@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-JARVIS desktop app — voice-first luminous soft-glow orb HUD (PyQt6).
+JARVIS desktop app — voice-first floating neural-brain HUD (PyQt6).
 
-Hold the orb (or Space) to talk; release to send. Press / for a ghost text
-field. Replies prefer TTS with a fading caption — present circle of light.
+Hold the brain (or Space) to talk; release to send. Press / for a ghost text
+field. Replies prefer TTS with a fading caption — synapses light while speaking.
 
 Run from the JARVIS folder: python app.py
 """
@@ -196,13 +196,13 @@ class JarvisWindow(QMainWindow):
         self._title_bar.minimize_requested.connect(self.showMinimized)
         outer.addWidget(self._title_bar)
 
-        # —— Orb fills the window ——
+        # —— Neural brain fills the window ——
         self._orb = OrbVisualizer()
         self._orb.hold_started.connect(self._mic_press)
         self._orb.hold_ended.connect(self._mic_release)
         outer.addWidget(self._orb, stretch=1)
 
-        # Status is silent — orb brightness/pulse only (compat shim kept off-layout).
+        # Status is silent — brain synapse activity only (compat shim kept off-layout).
         # Must parent to this window — an unparented StatusChip becomes a rogue
         # top-level Qt window and steals key focus (breaks / ghost text + Space).
         self._ring_caption = StatusChip(self)
