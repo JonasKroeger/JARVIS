@@ -43,37 +43,31 @@ TIMER_MAX_SECONDS = 24 * 3600
 FETCH_URL_DEFAULT_MAX = 8000
 FETCH_URL_HARD_MAX = 100_000
 
+# Speed / context caps (lean path toward ≤1s first tokens)
+MAX_MODEL_HISTORY = 10  # non-system msgs sent to Ollama (full session kept in UI)
+NO_TOOLS_NUM_PREDICT = 80
+TOOLS_DECISION_NUM_PREDICT = 256
+TOOLS_NARRATE_NUM_PREDICT = 96
+KEEP_ALIVE = "30m"
+FAST_TEMPERATURE = 0.3
+
 NOTES_DIR = Path.home() / ".jarvis" / "notes"
 
 # Active timers tracked by start_timer / list_timers (daemon threads).
 _ACTIVE_TIMERS: list[dict[str, Any]] = []
 _TIMERS_LOCK = threading.Lock()
 
-SYSTEM_PROMPT = """You are JARVIS, a calm, precise local assistant. Be brief unless asked for detail;
-dry wit is fine, never cruel. Call tools for real actions/data — never invent timestamps, notes,
-clipboard, weather, GitHub, system status, search results, file contents, stock prices, calendar
-events, memories, or command output.
+SYSTEM_PROMPT = """You are JARVIS — calm, precise, brief. Dry wit OK; never cruel.
+Use tools only for real Mac actions / live data. Never invent weather, time, notes, clipboard,
+calendar, files, search, stocks, system status, or memories.
 
-Tools: time, notes, open_url, open_app, clipboard, get_weather, github_status, get_system_status,
-notify, create_reminder, music_control, take_screenshot, list_running_apps, read_file, web_search,
-calendar_events, volume_control, start_timer, list_timers, fetch_url, stock_quote, dark_mode,
-daily_briefing, remember, recall, list_memories, forget.
+Memory: a "## Long-term memory" note is injected each turn — answer personal facts from it directly
+(no recall unless searching). Call remember/forget/list_memories when asked to store or change facts.
 
-Long-term memory: each turn includes a "## Long-term memory" system note with known facts.
-Answer personal questions (name, home, preferences, "what do you know about me") directly from that
-injected list — do not call recall unless you need to search/filter for something not clearly in it.
-Call remember when the user states lasting preferences/facts ("my name is", "I prefer", "remember that",
-projects, people, routines). Call list_memories / forget when asked. Never invent memories — only use
-the injected list and tool results.
+good morning / brief me / status report → call daily_briefing, then narrate. Chitchat, jokes, math,
+definitions, and personal facts from memory → plain text, no tools.
 
-When the user says good morning / brief me / status report (or similar), call daily_briefing and
-narrate the structured result — do not invent the briefing. Pure hi/thanks chitchat, short
-personal-fact questions, and simple factual/conversational Q&A (math, definitions, history, trivia,
-jokes) → plain text, no tools (memory is still injected). Answer those directly without calling tools.
-Only tool-call for Mac actions or live data (weather, calendar, files, search, etc.).
-
-Answer factual/historical questions neutrally. Refuse only requests for harm, crime, or illegal/
-exploitative material."""
+Refuse only harm, crime, or illegal/exploitative requests."""
 
 
 TOOLS: list[dict[str, Any]] = [
@@ -2133,7 +2127,7 @@ _ACTION_INTENT_RE = re.compile(
     r"\b(?:read\s+(?:the\s+)?file|list\s+(?:notes|files|running\s+apps))\b|"
     r"\b(?:notify|notification|send\s+(?:a\s+)?notification)\b|"
     r"\b(?:brief(?:ing)?\s+me|good\s+morning|status\s+report|daily\s+brief)\b|"
-    r"\b(?:remember|forget|recall|list\s+memor)\b|"
+    r"\b(?:remember|forget|recall|list\s+memor(?:y|ies)?)\b|"
     r"\b(?:stock(?:s)?|share\s+price|ticker)\b|"
     r"\b(?:dark\s+mode|light\s+mode)\b|"
     r"\b(?:fetch\s+(?:url|https?://)|download\s+https?://)\b|"
@@ -2207,17 +2201,153 @@ def is_short_general_qa(text: str) -> bool:
     return bool(_GENERAL_QA_RE.search(t))
 
 
-def should_skip_tools(text: str) -> bool:
-    """True when this user turn can use the lean no-tools Ollama path.
+def needs_tools(text: str) -> bool:
+    """True only when the user clearly wants Mac actions / live data / memory writes.
 
-    Skip for chitchat, personal-memory questions, and short general Q&A with no
-    action/live-data intent. Cap length so long requests still get tools.
+    Tools are OFF by default. Short facts, jokes, explanations, and memory recalls from
+    the injected context stay on the lean no-tools path.
     """
-    return (
-        is_chitchat(text)
-        or is_personal_memory_question(text)
-        or is_short_general_qa(text)
-    )
+    t = (text or "").strip()
+    if not t:
+        return False
+    # "what do you remember about me" contains "remember" but is answerable from injection.
+    if is_personal_memory_question(t):
+        return False
+    if _BRIEFING_RE.match(t):
+        return True
+    return looks_like_action_intent(t)
+
+
+def should_skip_tools(text: str) -> bool:
+    """Inverse of needs_tools — kept for smoke tests and call sites."""
+    return not needs_tools(text)
+
+
+def _trim_messages_for_api(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Keep leading system msgs + last MAX_MODEL_HISTORY non-system msgs for Ollama.
+
+    Full session history is preserved in the UI/CLI store; only the model payload is capped.
+    """
+    systems: list[dict[str, Any]] = []
+    rest: list[dict[str, Any]] = []
+    for m in messages:
+        if m.get("role") == "system" and not rest:
+            systems.append(m)
+        else:
+            rest.append(m)
+    if len(rest) > MAX_MODEL_HISTORY:
+        rest = rest[-MAX_MODEL_HISTORY:]
+        while rest and rest[0].get("role") == "tool":
+            rest = rest[1:]
+        # Drop orphaned assistant tool-call without following tool msgs
+        if (
+            rest
+            and rest[0].get("role") == "assistant"
+            and rest[0].get("tool_calls")
+            and (len(rest) == 1 or rest[1].get("role") != "tool")
+        ):
+            rest = rest[1:]
+            while rest and rest[0].get("role") == "tool":
+                rest = rest[1:]
+    return systems + rest
+
+
+def _format_direct_tool_reply(name: str, result: str) -> str | None:
+    """Human-readable one-liner for simple status tools — skip second LLM when OK."""
+    try:
+        data = json.loads(result)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    if data.get("error") or data.get("ok") is False:
+        return None
+
+    if name == "get_weather":
+        loc = data.get("nearest_area") or data.get("location_query") or "there"
+        temp = data.get("temp_C")
+        desc = data.get("weatherDesc") or ""
+        bits = [f"{loc}:"]
+        if temp is not None:
+            bits.append(f"{temp}°C")
+        if desc:
+            bits.append(str(desc))
+        hum = data.get("humidity")
+        wind = data.get("windspeedKmph")
+        extras = []
+        if hum is not None:
+            extras.append(f"humidity {hum}%")
+        if wind is not None:
+            extras.append(f"wind {wind} km/h")
+        line = " ".join(bits)
+        if extras:
+            line += ". " + ", ".join(extras) + "."
+        elif not line.endswith("."):
+            line += "."
+        return line
+
+    if name == "get_current_time":
+        iso = data.get("iso_local") or ""
+        tz = data.get("tz") or ""
+        if not iso:
+            return None
+        return f"Local time is {iso}" + (f" ({tz})." if tz else ".")
+
+    if name == "get_system_status":
+        host = data.get("hostname") or "this machine"
+        batt = data.get("battery") if isinstance(data.get("battery"), dict) else {}
+        disk = data.get("disk") if isinstance(data.get("disk"), dict) else {}
+        parts = [f"{host}"]
+        pct = batt.get("percent") if isinstance(batt, dict) else None
+        if pct is not None:
+            parts.append(f"battery {pct}%")
+        elif isinstance(batt, dict) and batt.get("raw"):
+            parts.append(f"battery {batt.get('raw')}")
+        if isinstance(disk, dict) and disk.get("avail"):
+            parts.append(f"disk free {disk.get('avail')}")
+        up = data.get("uptime")
+        if isinstance(up, str) and up.strip():
+            parts.append(up.strip())
+        return ". ".join(parts) + "."
+
+    if name == "stock_quote":
+        sym = data.get("symbol") or "?"
+        price = data.get("price")
+        cur = data.get("currency") or ""
+        chg = data.get("change_pct")
+        if price is None:
+            return None
+        line = f"{sym}: {price}"
+        if cur:
+            line += f" {cur}"
+        if chg is not None:
+            line += f" ({chg:+.2f}%)" if isinstance(chg, (int, float)) else f" ({chg})"
+        return line + "."
+
+    return None
+
+
+_DIRECT_REPLY_TOOLS = frozenset(
+    {"get_weather", "get_current_time", "get_system_status", "stock_quote"}
+)
+
+
+def warmup_model(client: httpx.Client, model: str) -> None:
+    """Tiny chat so the first real user message is not a cold load."""
+    try:
+        client.post(
+            f"{OLLAMA_HOST}/api/chat",
+            json={
+                "model": model,
+                "messages": [{"role": "user", "content": "."}],
+                "stream": False,
+                "keep_alive": KEEP_ALIVE,
+                "options": {"num_predict": 1, "temperature": 0.0},
+            },
+            timeout=120.0,
+        )
+    except Exception:  # noqa: BLE001 — warmup is best-effort
+        pass
 
 
 def chat_round(
@@ -2226,20 +2356,61 @@ def chat_round(
     messages: list[dict[str, Any]],
     *,
     use_tools: bool = True,
+    num_predict: int | None = None,
+    on_token: Any | None = None,
 ) -> tuple[list[dict[str, Any]], str | None]:
-    """One API call; returns updated messages and assistant text (if any)."""
+    """One API call; returns updated messages and assistant text (if any).
+
+    When ``on_token`` is set and tools are off (or this is a narrate-only call),
+    streams tokens to the callback for early HUD display.
+    """
+    if num_predict is None:
+        num_predict = TOOLS_DECISION_NUM_PREDICT if use_tools else NO_TOOLS_NUM_PREDICT
+    # Stream final text paths; keep tool-decision rounds buffered (need full tool_calls).
+    do_stream = on_token is not None and not use_tools
     payload: dict[str, Any] = {
         "model": model,
-        "messages": messages,
-        "stream": False,
-        # Keep the model loaded between turns; cap tokens on lean (no-tools) replies.
-        "keep_alive": "30m",
+        "messages": _trim_messages_for_api(messages),
+        "stream": do_stream,
+        "keep_alive": KEEP_ALIVE,
         "options": {
-            "num_predict": 96 if not use_tools else 512,
+            "num_predict": num_predict,
+            "temperature": FAST_TEMPERATURE,
         },
     }
     if use_tools:
         payload["tools"] = TOOLS
+
+    out_messages = list(messages)
+
+    if do_stream:
+        content_parts: list[str] = []
+        with client.stream(
+            "POST",
+            f"{OLLAMA_HOST}/api/chat",
+            json=payload,
+            timeout=180.0,
+        ) as r:
+            r.raise_for_status()
+            for line in r.iter_lines():
+                if not line:
+                    continue
+                try:
+                    data = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                msg = data.get("message") or {}
+                delta = msg.get("content") or ""
+                if delta:
+                    content_parts.append(delta)
+                    try:
+                        on_token(delta)
+                    except Exception:  # noqa: BLE001 — UI callback must not kill the turn
+                        pass
+        content = "".join(content_parts)
+        out_messages.append({"role": "assistant", "content": content, "tool_calls": None})
+        return out_messages, content if content else None
+
     r = client.post(
         f"{OLLAMA_HOST}/api/chat",
         json=payload,
@@ -2252,10 +2423,14 @@ def chat_round(
     content = msg.get("content") or ""
     tool_calls = msg.get("tool_calls")
 
-    out_messages = list(messages)
     out_messages.append({"role": role, "content": content, "tool_calls": tool_calls})
 
     if not tool_calls:
+        if content and on_token is not None:
+            try:
+                on_token(content)
+            except Exception:  # noqa: BLE001
+                pass
         return out_messages, content if content else None
 
     # Append tool results (Ollama/OpenAI-style)
@@ -2271,44 +2446,79 @@ def chat_round(
         }
         if tool_id:
             tool_msg["tool_call_id"] = tool_id
-        # Some stacks want name on tool message
         tool_msg["name"] = name
         out_messages.append(tool_msg)
+
+    # Single-shot: one simple status tool → templated reply, skip second LLM.
+    if len(tool_calls) == 1:
+        func0 = (tool_calls[0].get("function") or {}) if isinstance(tool_calls[0], dict) else {}
+        tname = func0.get("name") or ""
+        if tname in _DIRECT_REPLY_TOOLS:
+            tool_content = out_messages[-1].get("content") or ""
+            direct = _format_direct_tool_reply(tname, str(tool_content))
+            if direct:
+                out_messages.append({"role": "assistant", "content": direct, "tool_calls": None})
+                if on_token is not None:
+                    try:
+                        on_token(direct)
+                    except Exception:  # noqa: BLE001
+                        pass
+                return out_messages, direct
 
     return out_messages, None
 
 
 def run_turn(
-    client: httpx.Client, model: str, messages: list[dict[str, Any]]
+    client: httpx.Client,
+    model: str,
+    messages: list[dict[str, Any]],
+    *,
+    on_token: Any | None = None,
 ) -> tuple[list[dict[str, Any]], str]:
     """Run tool rounds until assistant returns text or cap hit.
 
-    Short greetings/chitchat, personal-fact questions, and short general Q&A skip the
-    tools schema for a faster single round-trip; long-term memory is still injected.
+    Tools are opt-in via needs_tools(); most chat uses the lean streamed no-tools path.
+    ``on_token`` receives text deltas for early HUD display (no-tools stream + final narrate).
     """
-    # Refresh sticky memory system message before each model call path.
     state = memory_store.inject_memory_messages(messages)
     last_text: str | None = None
-    use_tools = True
+    use_tools = False
     for m in reversed(state):
         if m.get("role") == "user":
-            use_tools = not should_skip_tools(str(m.get("content") or ""))
+            use_tools = needs_tools(str(m.get("content") or ""))
             break
 
-    rounds = 1 if not use_tools else MAX_TOOL_ROUNDS
-    for _ in range(rounds):
-        # Re-inject in case remember/forget ran in a prior tool round this turn.
+    if not use_tools:
+        state, text = chat_round(
+            client,
+            model,
+            state,
+            use_tools=False,
+            num_predict=NO_TOOLS_NUM_PREDICT,
+            on_token=on_token,
+        )
+        return state, text or "(No reply — try rephrasing or check Ollama logs.)"
+
+    for _ in range(MAX_TOOL_ROUNDS):
         state = memory_store.inject_memory_messages(state)
-        state, text = chat_round(client, model, state, use_tools=use_tools)
+        # First rounds: decide/call tools (buffered). After tools return None, narrate with stream.
+        narrating = bool(state and state[-1].get("role") == "tool")
+        state, text = chat_round(
+            client,
+            model,
+            state,
+            use_tools=not narrating,
+            num_predict=TOOLS_NARRATE_NUM_PREDICT if narrating else TOOLS_DECISION_NUM_PREDICT,
+            # Always pass on_token so single-shot direct replies reach the HUD.
+            on_token=on_token,
+        )
         if text is not None:
             last_text = text
-            break
-        # If a no-tools call somehow returned tool_calls (shouldn't), stop
-        if not use_tools:
             break
     if last_text is None:
         last_text = "(No reply — try rephrasing or check Ollama logs.)"
     return state, last_text
+
 
 
 def main() -> None:
@@ -2355,7 +2565,23 @@ def main() -> None:
             messages.append({"role": "user", "content": line})
             print("JARVIS › Thinking…", flush=True)
             try:
-                messages, reply = run_turn(client, model, messages)
+                streamed = False
+
+                def _cli_token(delta: str) -> None:
+                    nonlocal streamed
+                    if not streamed:
+                        print("\rJARVIS › ", end="", flush=True)
+                        streamed = True
+                    print(delta, end="", flush=True)
+
+                messages, reply = run_turn(
+                    client, model, messages, on_token=_cli_token
+                )
+                if streamed:
+                    print()
+                    print()
+                else:
+                    print(f"\rJARVIS › {reply}\n")
             except httpx.TimeoutException:
                 print(
                     "JARVIS › (Timed out waiting for Ollama — is the model loaded? try again)\n",
@@ -2369,8 +2595,8 @@ def main() -> None:
                 if messages and messages[-1].get("role") == "user":
                     messages.pop()
                 continue
-            # `messages` already includes the final assistant message from the API turn
-            print(f"JARVIS › {reply}\n")
+
+
 
 
 if __name__ == "__main__":

@@ -25,7 +25,7 @@ python app.py
 
 The window is a frameless **cinematic HUD** (default ~1180×740). Status strip uses `SYS // OLLAMA READY`, `SYS // SYNTHESIZING` (waiting on Ollama), `SYS // SPEAKING` (TTS playing), `SYS // LISTENING`. Left side is a multi-layer pulse/radar; right side stacks transcript + transmit bar. Telemetry shows `EL REQ // N` whenever TTS/`speak_async` is invoked. Startup fails fast if the model is missing (suggests `ollama pull …`).
 
-Short greetings/chitchat, personal-fact questions, and short general Q&A (≤120 chars: “what is pi”, math, who/what/explain, jokes) skip the tools schema when there is no Mac/action intent — faster single Ollama round-trip (memory is still injected). Action phrases (open/weather/calendar/remember/clipboard/…) still get tools. Lean no-tools calls use `keep_alive=30m` and `num_predict=96`.
+**Tools are off by default** unless the message clearly matches action/live-data intent (weather, open, calendar, remember, clipboard, briefing, …). Facts, jokes, explanations, and personal recalls from injected memory use a lean streamed no-tools path (`keep_alive=30m`, `num_predict≈80`, low temperature). The HUD streams tokens as they arrive; TTS (`speak_async`) never gates visible text. Injected long-term memory is capped (~6 short lines); recent history sent to Ollama is trimmed. Simple status tools (weather/time/system/stock) may reply from a template and skip a second LLM pass. On startup the app warms the model with a tiny chat.
 
 ### CLI (secondary)
 

@@ -16,7 +16,7 @@ from datetime import datetime
 import httpx
 import numpy as np
 from PyQt6.QtCore import Qt, QThread, QTimer, pyqtSignal
-from PyQt6.QtGui import QFont
+from PyQt6.QtGui import QFont, QTextCursor
 from PyQt6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -32,7 +32,7 @@ from PyQt6.QtWidgets import (
 )
 
 import jarvis as brain
-from jarvis import ensure_model, run_turn
+from jarvis import ensure_model, run_turn, warmup_model
 from hud_widgets import (
     C_ASSIST,
     C_CYAN,
@@ -347,6 +347,16 @@ class JarvisWindow(QMainWindow):
 
         self._ready_status = "SYS // OLLAMA READY"
         self._set_status(self._ready_status)
+        # Warm the model so the first user message is not a cold load.
+        model = self._model
+
+        def _warm() -> None:
+            try:
+                warmup_model(self._client, model)
+            except Exception:  # noqa: BLE001
+                pass
+
+        threading.Thread(target=_warm, daemon=True).start()
 
     def _append_chat(self, who: str, text: str) -> None:
         self._chat_stack.set_empty(False)
@@ -394,20 +404,63 @@ class JarvisWindow(QMainWindow):
         self._busy = True
         self._send_btn.setEnabled(False)
         self._entry.setEnabled(False)
-        self._set_status("SYS // SYNTHESIZING")
+        self._stream_active = False
+        self._stream_buf = ""
+        self._set_status("SYS // THINKING")
 
         self._worker = OllamaWorker(self._client, self._model, self._messages, text, self)
+        self._worker.token.connect(self._on_ollama_token)
         self._worker.finished_ok.connect(self._on_ollama_ok)
         self._worker.finished_err.connect(self._on_ollama_err)
         self._worker.start()
+
+    def _begin_assistant_stream(self) -> None:
+        """Open a JARVIS bubble; tokens are inserted as plain text at the end."""
+        self._chat_stack.set_empty(False)
+        ts = datetime.now().strftime("%H:%M")
+        ts_html = (
+            f'<span style="color:{C_MUTED};font-size:10px;'
+            f'letter-spacing:1px;">{ts}</span>'
+        )
+        html = (
+            f'<p style="margin:4px 0 12px 0;line-height:1.45;">'
+            f"{ts_html}"
+            f'<span style="color:{C_MUTED};">  </span>'
+            f'<span style="color:{C_CYAN_DIM};font-size:10px;font-weight:600;'
+            f'letter-spacing:2px;">JARVIS</span>'
+            f"<br></p>"
+        )
+        self._chat.append(html)
+
+    def _on_ollama_token(self, delta: str) -> None:
+        if not delta:
+            return
+        if not self._stream_active:
+            self._stream_active = True
+            self._stream_buf = ""
+            self._begin_assistant_stream()
+            self._set_status("SYS // SYNTHESIZING")
+        self._stream_buf += delta
+        cursor = self._chat.textCursor()
+        cursor.movePosition(QTextCursor.MoveOperation.End)
+        # Insert as plain text (deltas are raw model tokens)
+        cursor.insertText(delta)
+        self._chat.setTextCursor(cursor)
+        self._chat.ensureCursorVisible()
 
     def _on_ollama_ok(self, msgs: list, reply: str) -> None:
         self._messages = msgs
         self._busy = False
         self._send_btn.setEnabled(True)
         self._entry.setEnabled(True)
-        # Show text immediately — never block UI on TTS
-        self._append_chat("JARVIS", reply)
+        # If nothing streamed (buffered tool path), show full reply now.
+        # Never gate visible text on TTS — speak_async is background-only.
+        if not self._stream_active:
+            self._append_chat("JARVIS", reply)
+        elif reply and reply != self._stream_buf:
+            # Direct/single-shot may have sent the full string as one "token";
+            # if stream buf differs, replace isn’t needed — prefer shown text.
+            pass
         if self._auto_speak.isChecked() and speak_async:
             self._speak_gen += 1
             gen = self._speak_gen
@@ -427,7 +480,13 @@ class JarvisWindow(QMainWindow):
         self._busy = False
         self._send_btn.setEnabled(True)
         self._entry.setEnabled(True)
-        self._append_chat("JARVIS", f"(Error: {err})")
+        if not self._stream_active:
+            self._append_chat("JARVIS", f"(Error: {err})")
+        else:
+            cursor = self._chat.textCursor()
+            cursor.movePosition(QTextCursor.MoveOperation.End)
+            cursor.insertText(f"\n(Error: {err})")
+            self._chat.setTextCursor(cursor)
         self._set_status("Error — see chat")
 
     def _mic_press(self) -> None:
@@ -516,6 +575,7 @@ def _esc(text: str) -> str:
 class OllamaWorker(QThread):
     finished_ok = pyqtSignal(list, str)
     finished_err = pyqtSignal(str)
+    token = pyqtSignal(str)
 
     def __init__(
         self,
@@ -534,7 +594,14 @@ class OllamaWorker(QThread):
     def run(self) -> None:
         try:
             self._messages.append({"role": "user", "content": self._user_text})
-            msgs, reply = run_turn(self._client, self._model, self._messages)
+
+            def _on_token(delta: str) -> None:
+                if delta:
+                    self.token.emit(delta)
+
+            msgs, reply = run_turn(
+                self._client, self._model, self._messages, on_token=_on_token
+            )
             self.finished_ok.emit(msgs, reply)
         except Exception as e:  # noqa: BLE001
             self.finished_err.emit(str(e))

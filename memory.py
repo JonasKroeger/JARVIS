@@ -13,7 +13,7 @@ from typing import Any
 MEMORY_PATH: Path = Path.home() / ".jarvis" / "memory.json"
 
 MEMORY_TEXT_MAX = 500
-MEMORY_INJECT_CAP = 12
+MEMORY_INJECT_CAP = 6
 RECALL_TOP = 10
 RECALL_RECENT = 15
 LIST_DEFAULT_LIMIT = 20
@@ -207,8 +207,8 @@ def format_memory_block(path: Path | None = None, *, cap: int = MEMORY_INJECT_CA
     else:
         for item in items:
             text = str(item.get("text") or "").strip().replace("\n", " ")
-            if len(text) > 200:
-                text = text[:197] + "..."
+            if len(text) > 120:
+                text = text[:117] + "..."
             lines.append(f"- {text}")
     return "\n".join(lines)
 

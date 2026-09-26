@@ -515,10 +515,44 @@ class ToolSmokeTests(unittest.TestCase):
             self.assertTrue(jarvis.is_short_general_qa(phrase), msg=phrase)
             self.assertTrue(jarvis.should_skip_tools(phrase), msg=phrase)
 
-    def test_long_or_non_question_keeps_tools(self) -> None:
+    def test_long_without_action_skips_tools(self) -> None:
+        """Tools are opt-in: long text without action keywords stays lean."""
         long_q = "what is pi " + ("x" * 130)
         self.assertFalse(jarvis.is_short_general_qa(long_q))
-        self.assertFalse(jarvis.should_skip_tools(long_q))
+        self.assertFalse(jarvis.needs_tools(long_q))
+        self.assertTrue(jarvis.should_skip_tools(long_q))
+
+    def test_needs_tools_opt_in(self) -> None:
+        self.assertFalse(jarvis.needs_tools("what is pi"))
+        self.assertFalse(jarvis.needs_tools("what's my name"))
+        self.assertFalse(jarvis.needs_tools("tell me a joke"))
+        self.assertTrue(jarvis.needs_tools("what's the weather"))
+        self.assertTrue(jarvis.needs_tools("good morning"))
+        self.assertTrue(jarvis.needs_tools("open safari"))
+        self.assertTrue(jarvis.needs_tools("remember that I like tea"))
+
+    def test_direct_tool_reply_weather(self) -> None:
+        raw = json.dumps({
+            "location_query": "Helsinki",
+            "nearest_area": "Helsinki",
+            "temp_C": "5",
+            "weatherDesc": "Partly cloudy",
+            "humidity": "80",
+            "windspeedKmph": "12",
+        })
+        line = jarvis._format_direct_tool_reply("get_weather", raw)
+        self.assertIsNotNone(line)
+        assert line is not None
+        self.assertIn("Helsinki", line)
+        self.assertIn("5°C", line)
+        self.assertIn("Partly cloudy", line)
+
+    def test_direct_tool_reply_skips_errors(self) -> None:
+        self.assertIsNone(
+            jarvis._format_direct_tool_reply(
+                "get_weather", json.dumps({"error": "boom"})
+            )
+        )
 
 
 
