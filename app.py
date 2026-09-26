@@ -42,6 +42,7 @@ from hud_widgets import (
     HUD_STYLESHEET,
     HudRoot,
     OrbVisualizer,
+    StatusChip,
     TitleBar,
 )
 
@@ -200,10 +201,13 @@ class JarvisWindow(QMainWindow):
         self._orb.hold_ended.connect(self._mic_release)
         outer.addWidget(self._orb, stretch=1)
 
-        self._ring_caption = QLabel("ONLINE")
-        self._ring_caption.setObjectName("ringCaption")
-        self._ring_caption.setAlignment(Qt.AlignmentFlag.AlignHCenter)
-        outer.addWidget(self._ring_caption)
+        self._ring_caption = StatusChip()
+        self._ring_caption.setText("ONLINE")
+        chip_row = QVBoxLayout()
+        chip_row.setContentsMargins(0, 6, 0, 2)
+        chip_row.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+        chip_row.addWidget(self._ring_caption, alignment=Qt.AlignmentFlag.AlignHCenter)
+        outer.addLayout(chip_row)
 
         self._captions = CaptionStack()
         outer.addWidget(self._captions)
