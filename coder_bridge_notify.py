@@ -17,7 +17,7 @@ Modes:
 Env:
   CODER_BRIDGE_DIR          mailbox root
   CODER_BRIDGE_NOTIFY_URL   webhook URL (optional; pending file still updated)
-  CODER_BRIDGE_POLL         poll interval seconds (default 0.25)
+  CODER_BRIDGE_POLL         fallback poll seconds (default 0.1; kqueue push on macOS)
   CODER_BRIDGE_NOTIFY_RETRY seconds between re-notify of same id (default 30)
 """
 
@@ -33,6 +33,8 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Any
+
+from coder_bridge_watch import notify_poll_interval, watch_inbox_events, write_trigger
 
 
 def _root_dir() -> Path:
@@ -61,11 +63,7 @@ def ensure_dirs() -> None:
 
 
 def _poll_interval() -> float:
-    raw = os.environ.get("CODER_BRIDGE_POLL", "0.25").strip()
-    try:
-        return max(0.05, float(raw))
-    except ValueError:
-        return 0.25
+    return notify_poll_interval()
 
 
 def _notify_url() -> str | None:
@@ -227,6 +225,7 @@ def run_loop(*, once: bool = False) -> int:
     retry = _notify_retry()
     # id -> last notify monotonic time
     notified: dict[str, float] = {}
+    stop = {"done": False}
     print(
         json.dumps(
             {
@@ -235,12 +234,15 @@ def run_loop(*, once: bool = False) -> int:
                 "notify_url": bool(_notify_url()),
                 "mode": "live",
                 "echo": False,
+                "poll_s": interval,
+                "watch": "kqueue+poll",
             },
             ensure_ascii=False,
         ),
         flush=True,
     )
-    while True:
+
+    def scan_once() -> None:
         touch_heartbeat()
         try:
             promoted = promote_replies_drop()
@@ -253,8 +255,10 @@ def run_loop(*, once: bool = False) -> int:
 
             pending = list_pending()
             write_pending_snapshot(pending)
+            if pending:
+                # Instant wake for sibling watchers / parent pollers
+                write_trigger(reason="pending", req_id=str(pending[0].get("id") or ""))
             live_ids = {str(p.get("id")) for p in pending}
-            # Drop notify memory for answered ids
             for old in list(notified.keys()):
                 if old not in live_ids:
                     notified.pop(old, None)
@@ -294,9 +298,23 @@ def run_loop(*, once: bool = False) -> int:
                 file=sys.stderr,
             )
 
-        if once:
-            return 0
-        time.sleep(interval)
+    if once:
+        scan_once()
+        return 0
+
+    def _stop() -> bool:
+        return stop["done"]
+
+    try:
+        watch_inbox_events(
+            _inbox_dir(),
+            on_event=scan_once,
+            stop_flag=_stop,
+            poll_fallback=interval,
+        )
+    except KeyboardInterrupt:
+        stop["done"] = True
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:

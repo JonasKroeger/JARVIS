@@ -23,3 +23,6 @@ coder-bridge-launchd.log
 coder_bridge/PENDING.json
 coder_bridge/replies/*.json
 coder_bridge.notify.env
+coder_bridge/TRIGGER
+coder_bridge_autofulfill.pid
+coder-bridge-autofulfill.log

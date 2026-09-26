@@ -21,6 +21,7 @@ Mailbox layout (under ~/JARVIS/coder_bridge/ by default):
   outbox/<id>.json   — replies written by Coder
   replies/<id>.json  — optional drop folder (notifier promotes to outbox)
   PENDING.json       — snapshot for aggressive polling
+  TRIGGER            — mtime bump on each inbox write (fast local wake)
 
 Live mode (CODER_BRIDGE_MODE=live, the default):
   - No in-process echo
@@ -43,6 +44,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import urlparse
+
+from coder_bridge_watch import outbox_poll_interval, write_trigger
 
 DEFAULT_PORT = 8766
 DEFAULT_TIMEOUT = 25.0
@@ -253,24 +256,30 @@ def write_inbox(
     tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     tmp.replace(path)
     refresh_pending_snapshot()
+    write_trigger(reason="inbox_write", req_id=req_id)
     fire_notify(payload, log=log)
     return path
 
 
 def wait_for_outbox(req_id: str, timeout: float) -> dict[str, Any]:
-    """Poll until outbox/<id>.json appears or timeout. Returns parsed body."""
+    """Poll until outbox/<id>.json appears or timeout. Returns parsed body.
+
+    Poll interval defaults to 50ms (CODER_BRIDGE_OUTBOX_POLL, clamped 20–200ms)
+    so fulfill → HTTP response stays sub-second once the outbox file lands.
+    """
     out_path = _outbox_dir() / f"{req_id}.json"
+    interval = outbox_poll_interval()
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if out_path.is_file():
             try:
                 data = json.loads(out_path.read_text(encoding="utf-8"))
             except (OSError, UnicodeDecodeError, json.JSONDecodeError):
-                time.sleep(0.05)
+                time.sleep(interval)
                 continue
             if isinstance(data, dict) and "reply" in data:
                 return data
-        time.sleep(0.05)
+        time.sleep(interval)
     raise TimeoutError(
         f"Coder bridge: no reply within {timeout:.0f}s "
         f"(id={req_id}). Fulfill: python fulfill_coder_reply.py --id {req_id} --reply TEXT"

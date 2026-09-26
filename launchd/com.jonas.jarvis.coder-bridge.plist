@@ -27,6 +27,10 @@
     <string>90</string>
     <key>CODER_BRIDGE_ECHO_WORKER</key>
     <string>0</string>
+    <key>CODER_BRIDGE_POLL</key>
+    <string>0.1</string>
+    <key>CODER_BRIDGE_OUTBOX_POLL</key>
+    <string>0.05</string>
     <key>PATH</key>
     <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
   </dict>

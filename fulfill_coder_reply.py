@@ -25,6 +25,8 @@ import time
 from pathlib import Path
 from typing import Any
 
+from coder_bridge_watch import write_trigger
+
 
 def _root_dir() -> Path:
     override = os.environ.get("CODER_BRIDGE_DIR", "").strip()
@@ -84,6 +86,7 @@ def write_reply(req_id: str, reply: str, *, extra: dict[str, Any] | None = None)
         pass
     # Refresh PENDING.json snapshot
     refresh_pending_snapshot()
+    write_trigger(reason="fulfilled", req_id=req_id)
     return path
 
 
@@ -167,7 +170,7 @@ def main(argv: list[str] | None = None) -> int:
         if time.monotonic() >= deadline:
             print("no pending requests", file=sys.stderr)
             return 2
-        time.sleep(0.2)
+        time.sleep(0.05)
 
     assert req is not None
     req_id = str(req["id"])

@@ -199,17 +199,44 @@ in live mode.
 - `coder_bridge/outbox/<id>.json`
 - `coder_bridge/replies/<id>.json` — optional drop
 - `coder_bridge/PENDING.json` — poll snapshot
+- `coder_bridge/TRIGGER` — mtime bump for instant local wake
 
 ### Reverse files
 
 - `coder_bridge_server.py` — mailbox on `:8766` (notify on queue)
 - `coder_bridge_notify.py` — live watcher (PENDING + webhook + replies drop)
 - `fulfill_coder_reply.py` — Coder writes real replies
+- `coder_bridge_watch.py` — kqueue/TRIGGER helpers
+- `coder_bridge_autofulfill.py` — timing-test instant fulfiller
 - `coder_bridge_worker.py` — legacy echo/stdin worker (**not** started in live)
 - `jarvis_ask_coder.py` — CLI client
 - `start_coder_bridge.sh` — live mailbox + notifier
 - `launchd/com.jonas.jarvis.coder-bridge.plist` + `install_coder_bridge_launchagent.sh`
 - `jarvis.py` — tool `ask_coder` / `_force_ask_coder_turn`
+
+### Latency (voice target <5s for simple Q)
+
+Measured wall time is `ask_coder ok after Xs` in `jarvis-debug.log` (TTS is separate).
+
+| Layer | Target | Notes |
+|-------|--------|-------|
+| force_ask_coder → POST | ms | skips Ollama tool selection |
+| Mailbox outbox poll | ≤50–100ms | `CODER_BRIDGE_OUTBOX_POLL` (default 0.05) |
+| Notifier / local watcher | ≤100ms | kqueue push + `CODER_BRIDGE_POLL` fallback; writes `TRIGGER` |
+| Pure bridge RTT (autofulfill) | ≪1s | `coder_bridge_autofulfill.py --reply "Four."` |
+| Real Coder think time | variable | parent agent / LLM — dominates when webhook unset |
+| TTS | separate | do not fold into bridge RTT |
+
+Without `CODER_BRIDGE_NOTIFY_URL`, rely on the live notifier `TRIGGER`/`PENDING.json` + a tight local watcher (or parent `/pending` poll ≤0.5s). The 37s "2+2" case was fulfill wait, not tool selection.
+
+Timing-test autofulfill (isolates bridge):
+
+```bash
+# Terminal A
+.venv/bin/python coder_bridge_autofulfill.py --reply "Four." --once --wait 30
+# Terminal B
+time .venv/bin/python jarvis_ask_coder.py "what is 2+2"
+```
 
 ### Success criteria (live)
 
