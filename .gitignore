@@ -4,3 +4,7 @@ __pycache__/
 .DS_Store
 jarvis-debug.log
 .env
+jarvis.pid
+piper/voices/
+piper/*.wav
+piper/**/*.onnx

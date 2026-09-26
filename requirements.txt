@@ -3,3 +3,4 @@ faster-whisper>=1.0.0
 sounddevice>=0.4.6
 numpy>=1.26.0
 PyQt6>=6.6.0
+piper-tts>=1.8.0,<2
