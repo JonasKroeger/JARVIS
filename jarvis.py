@@ -64,6 +64,11 @@ calendar, files, search, stocks, system status, or memories.
 Memory: a "## Long-term memory" note is injected each turn — answer personal facts from it directly
 (no recall unless searching). Call remember/forget/list_memories when asked to store or change facts.
 
+Coder: Coder is Jonas's Grok Bot coding assistant (local reverse bridge). When the user mentions
+Coder or wants to ask/tell/talk to/message/ping Coder, you MUST call ask_coder with their request
+(or a clear paraphrase). Never invent Coder's reply. Never joke about cover fire, pairing, or
+handing off instead of calling the tool. If the bridge errors or times out, report the error plainly.
+
 good morning / brief me / status report → call daily_briefing, then narrate. Chitchat, jokes, math,
 definitions, and personal facts from memory → plain text, no tools.
 
@@ -2012,9 +2017,9 @@ def tool_ask_coder(args: dict[str, Any]) -> str:
     )
     api_key = os.environ.get("CODER_BRIDGE_API_KEY", "").strip() or None
     try:
-        timeout = float(os.environ.get("CODER_BRIDGE_TIMEOUT", "120"))
+        timeout = float(os.environ.get("CODER_BRIDGE_TIMEOUT", "90"))
     except ValueError:
-        timeout = 120.0
+        timeout = 90.0
     timeout = max(5.0, min(timeout, 600.0))
     headers = {"Content-Type": "application/json"}
     if api_key:
@@ -2201,7 +2206,7 @@ _ACTION_INTENT_RE = re.compile(
     r"\b(?:what(?:'s|s| is)\s+(?:the\s+)?(?:time|weather|clipboard)|what\s+time\s+is\s+it)\b|"
     r"\b(?:save\s+(?:a\s+)?note|create\s+(?:a\s+)?note|write\s+(?:a\s+)?note)\b|"
     r"\b(?:set\s+(?:a\s+)?(?:timer|reminder|volume))\b|"
-    r"\b(?:ask\s+coder|tell\s+coder|message\s+coder)\b"
+    r"\bcoder\b"
     r")",
     re.IGNORECASE,
 )

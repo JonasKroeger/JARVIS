@@ -530,6 +530,14 @@ class ToolSmokeTests(unittest.TestCase):
         self.assertTrue(jarvis.needs_tools("good morning"))
         self.assertTrue(jarvis.needs_tools("open safari"))
         self.assertTrue(jarvis.needs_tools("remember that I like tea"))
+        # Coder teammate — any mention enables tools so ask_coder can run
+        self.assertTrue(jarvis.needs_tools("talk to coder"))
+        self.assertTrue(jarvis.needs_tools("what does coder say"))
+        self.assertTrue(jarvis.needs_tools("hello coder"))
+        self.assertTrue(jarvis.needs_tools("ask coder X"))
+        self.assertTrue(jarvis.needs_tools("tell coder to fix the bug"))
+        self.assertTrue(jarvis.needs_tools("message coder please"))
+        self.assertTrue(jarvis.needs_tools("ping coder"))
 
     def test_direct_tool_reply_weather(self) -> None:
         raw = json.dumps({
