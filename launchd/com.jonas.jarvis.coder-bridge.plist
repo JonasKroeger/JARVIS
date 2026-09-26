@@ -25,6 +25,8 @@
     <string>live</string>
     <key>CODER_BRIDGE_TIMEOUT</key>
     <string>90</string>
+    <key>CODER_BRIDGE_AUTOFULFILL</key>
+    <string>0</string>
     <key>CODER_BRIDGE_ECHO_WORKER</key>
     <string>0</string>
     <key>CODER_BRIDGE_POLL</key>

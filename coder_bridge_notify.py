@@ -127,6 +127,47 @@ def write_pending_snapshot(pending: list[dict[str, Any]]) -> None:
     tmp.replace(snap)
 
 
+def write_surfaced(req: dict[str, Any] | None) -> None:
+    """Surface-only snapshot for parent wake (never fulfills)."""
+    ensure_dirs()
+    snap = _root_dir() / "SURFACED.json"
+    if not req:
+        body = {"surfaced_at": time.time(), "count": 0, "pending": None, "status": "idle"}
+    else:
+        body = {
+            "surfaced_at": time.time(),
+            "id": req.get("id"),
+            "message": req.get("message"),
+            "context": req.get("context") or {},
+            "created_at": req.get("created_at"),
+            "status": "awaiting_parent_fulfill",
+            "fulfill_hint": (
+                f'cd ~/JARVIS && .venv/bin/python fulfill_coder_reply.py '
+                f'--id {req.get("id")} --reply "YOUR ANSWER"'
+            ),
+        }
+    tmp = snap.with_suffix(".tmp")
+    tmp.write_text(json.dumps(body, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    tmp.replace(snap)
+    log = _root_dir() / "surface.log"
+    if req:
+        with open(log, "a", encoding="utf-8") as f:
+            f.write(
+                json.dumps(
+                    {
+                        "ts": time.time(),
+                        "event": "surfaced",
+                        "id": req.get("id"),
+                        "message": req.get("message"),
+                        "via": "notify_daemon",
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n"
+            )
+
+
+
 def post_notify(req: dict[str, Any]) -> tuple[bool, str]:
     url = _notify_url()
     if not url:
@@ -255,6 +296,7 @@ def run_loop(*, once: bool = False) -> int:
 
             pending = list_pending()
             write_pending_snapshot(pending)
+            write_surfaced(pending[0] if pending else None)
             if pending:
                 # Instant wake for sibling watchers / parent pollers
                 write_trigger(reason="pending", req_id=str(pending[0].get("id") or ""))

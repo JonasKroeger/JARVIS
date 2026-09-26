@@ -20,6 +20,8 @@ fi
 
 # Live is the product default.
 export CODER_BRIDGE_MODE="${CODER_BRIDGE_MODE:-live}"
+export CODER_BRIDGE_AUTOFULFILL="${CODER_BRIDGE_AUTOFULFILL:-0}"
+export CODER_BRIDGE_AUTO="${CODER_BRIDGE_AUTO:-}"  # must stay unset/off in live
 if [[ "$CODER_BRIDGE_MODE" == "live" ]]; then
   export CODER_BRIDGE_TIMEOUT="${CODER_BRIDGE_TIMEOUT:-90}"
   # Echo worker stays off in live mode unless explicitly forced.
@@ -27,6 +29,29 @@ if [[ "$CODER_BRIDGE_MODE" == "live" ]]; then
 else
   export CODER_BRIDGE_ECHO_WORKER="${CODER_BRIDGE_ECHO_WORKER:-1}"
 fi
+
+
+stop_autofulfill() {
+  # Timing-test fulfiller must NEVER run in live product path.
+  pkill -f "coder_bridge_autofulfill" 2>/dev/null || true
+  AF_PIDFILE="${CODER_BRIDGE_AUTOFULFILL_PID:-$ROOT/coder_bridge_autofulfill.pid}"
+  if [[ -f "$AF_PIDFILE" ]]; then
+    aold="$(cat "$AF_PIDFILE" 2>/dev/null || true)"
+    if [[ -n "${aold}" ]] && kill -0 "$aold" 2>/dev/null; then
+      echo "stopping autofulfill pid=$aold" >&2
+      kill "$aold" 2>/dev/null || true
+      sleep 0.2
+      kill -9 "$aold" 2>/dev/null || true
+    fi
+    rm -f "$AF_PIDFILE"
+  fi
+  # Hard off unless explicitly forced for offline timing tests.
+  export CODER_BRIDGE_AUTOFULFILL="${CODER_BRIDGE_AUTOFULFILL:-0}"
+  if [[ ! "${CODER_BRIDGE_AUTOFULFILL}" =~ ^(0|false|False|off|OFF)$ ]]; then
+    echo "WARNING: CODER_BRIDGE_AUTOFULFILL=${CODER_BRIDGE_AUTOFULFILL} but start script will NOT launch it (use coder_bridge_autofulfill.py manually for timing tests only)" >&2
+  fi
+  echo "autofulfill killed/disabled (CODER_BRIDGE_AUTOFULFILL=0)" >&2
+}
 
 stop_echo_worker() {
   if [[ -f "$WORKER_PIDFILE" ]]; then
@@ -118,6 +143,7 @@ start_echo_worker() {
 }
 
 stop_echo_worker
+stop_autofulfill
 start_mailbox
 start_live_notifier
 start_echo_worker

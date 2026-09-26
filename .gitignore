@@ -26,3 +26,5 @@ coder_bridge.notify.env
 coder_bridge/TRIGGER
 coder_bridge_autofulfill.pid
 coder-bridge-autofulfill.log
+coder_bridge/SURFACED.json
+coder_bridge/surface.log

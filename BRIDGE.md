@@ -164,7 +164,16 @@ Env: `CODER_URL`, `CODER_BRIDGE_API_KEY`, `CODER_BRIDGE_TIMEOUT` (live default 9
    }
    ```
 
-2. **Aggressive poll (fallback)**  
+2. **One-shot surface watcher (preferred local wake)**  
+   Parent Shell task:
+
+   ```bash
+   cd ~/JARVIS && .venv/bin/python coder_bridge_surface.py --wait 600
+   # exits 0 with JSON {id, message} when a prompt arrives — does NOT fulfill
+   # parent answers, then restarts the surface watcher
+   ```
+
+3. **Aggressive poll (fallback)**  
    Parent cron/routine (≥5 min) or a tight Shell poller:
 
    ```bash
@@ -204,10 +213,11 @@ in live mode.
 ### Reverse files
 
 - `coder_bridge_server.py` — mailbox on `:8766` (notify on queue)
-- `coder_bridge_notify.py` — live watcher (PENDING + webhook + replies drop)
-- `fulfill_coder_reply.py` — Coder writes real replies
+- `coder_bridge_notify.py` — live surface daemon (PENDING + SURFACED + webhook; **never fulfills**)
+- `coder_bridge_surface.py` — **one-shot** surface watcher: wait for ONE pending → write `SURFACED.json` + log → exit with id/message (**never fulfills**; parent restarts after answer)
+- `fulfill_coder_reply.py` — Coder writes real replies (only allowed fulfiller)
 - `coder_bridge_watch.py` — kqueue/TRIGGER helpers
-- `coder_bridge_autofulfill.py` — timing-test instant fulfiller
+- `coder_bridge_autofulfill.py` — timing-test only; **never** started by LaunchAgent / start script
 - `coder_bridge_worker.py` — legacy echo/stdin worker (**not** started in live)
 - `jarvis_ask_coder.py` — CLI client
 - `start_coder_bridge.sh` — live mailbox + notifier
@@ -237,6 +247,13 @@ Timing-test autofulfill (isolates bridge):
 # Terminal B
 time .venv/bin/python jarvis_ask_coder.py "what is 2+2"
 ```
+
+### Hard rule (live)
+
+- Surface-only watchers **never** compose or invent replies (no Hitchhiker/42/math placeholders).
+- **Never** call `fulfill_coder_reply` from autofill/autofulfill/echo in live mode.
+- Only the parent Coder agent may fulfill via `fulfill_coder_reply.py` with a real answer.
+- LaunchAgent / `start_coder_bridge.sh` set `CODER_BRIDGE_ECHO_WORKER=0` and `CODER_BRIDGE_AUTOFULFILL=0`.
 
 ### Success criteria (live)
 
