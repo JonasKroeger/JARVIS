@@ -7,8 +7,13 @@ from __future__ import annotations
 
 import json
 import os
+import platform
 import re
+import shutil
+import subprocess
 import sys
+import urllib.parse
+import webbrowser
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -17,12 +22,19 @@ import httpx
 
 OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "http://127.0.0.1:11434").rstrip("/")
 MAX_TOOL_ROUNDS = 6
+CLIPBOARD_MAX_CHARS = 20_000
 
 NOTES_DIR = Path.home() / ".jarvis" / "notes"
 
 SYSTEM_PROMPT = """You are JARVIS, a calm, precise personal AI assistant running locally for your user.
 Speak clearly and briefly unless asked for detail. You may use dry wit sparingly; never cruel or smug.
-When tools are needed, call them — do not invent timestamps, file contents, or command output.
+When tools are needed, call them — do not invent timestamps, file contents, clipboard text, weather,
+GitHub data, or command output.
+
+You can open http(s) URLs in the default browser (open_url), launch macOS apps by name (open_app),
+read/write the system clipboard (get_clipboard / set_clipboard), fetch live weather for a city
+(get_weather), and summarize open GitHub PRs authored by or awaiting review from the user
+(github_status). Always use these tools; never fabricate their results.
 
 Answer factual questions directly. Straightforward history, dates, geography, and well-documented public events
 (including conflicts, wars, and historical figures) are normal reference topics: give neutral, encyclopedia-style
@@ -82,6 +94,99 @@ TOOLS: list[dict[str, Any]] = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "open_url",
+            "description": "Opens an http:// or https:// URL in the default web browser.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {
+                        "type": "string",
+                        "description": "Full URL starting with http:// or https://",
+                    }
+                },
+                "required": ["url"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "open_app",
+            "description": "Launches a macOS application by name (e.g. Safari, Notes, Terminal).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "Application name as shown in /Applications (no path).",
+                    }
+                },
+                "required": ["name"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_clipboard",
+            "description": "Reads the current system clipboard text (truncated if very long).",
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "set_clipboard",
+            "description": "Writes text to the system clipboard.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string", "description": "Text to place on the clipboard."}
+                },
+                "required": ["text"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_weather",
+            "description": "Fetches current weather for a city via wttr.in (live data).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "location": {
+                        "type": "string",
+                        "description": "City or place name, e.g. Helsinki, London",
+                    }
+                },
+                "required": ["location"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "github_status",
+            "description": (
+                "Summarizes open GitHub PRs authored by the authenticated user and PRs "
+                "awaiting their review (via gh CLI). Optional login is informational only."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "login": {
+                        "type": "string",
+                        "description": "Optional GitHub login hint; empty uses gh auth.",
+                    }
+                },
+                "required": [],
+            },
+        },
+    },
 ]
 
 
@@ -96,6 +201,16 @@ def _safe_basename(name: str) -> str | None:
     if not re.fullmatch(r"[\w.\-]{1,120}", base):
         return None
     return base
+
+
+def _safe_app_name(name: str) -> str | None:
+    """Reject path/shell metacharacters; keep simple app names like 'Safari'."""
+    name = name.strip()
+    if not name or len(name) > 120:
+        return None
+    if any(c in name for c in ("/", ";", "|", "$", "`", "\n", "\r")):
+        return None
+    return name
 
 
 def tool_get_current_time(_: dict[str, Any]) -> str:
@@ -139,11 +254,313 @@ def tool_save_note(args: dict[str, Any]) -> str:
     return json.dumps({"saved": base, "bytes": len(content.encode("utf-8"))})
 
 
+def tool_open_url(args: dict[str, Any]) -> str:
+    url = str(args.get("url", "")).strip()
+    if not (url.startswith("http://") or url.startswith("https://")):
+        return json.dumps({"ok": False, "error": "url must start with http:// or https://"})
+    try:
+        opened = webbrowser.open(url)
+    except Exception as e:  # noqa: BLE001
+        return json.dumps({"ok": False, "error": str(e)})
+    return json.dumps({"ok": True, "url": url, "opened": bool(opened)})
+
+
+def tool_open_app(args: dict[str, Any]) -> str:
+    name = _safe_app_name(str(args.get("name", "")))
+    if not name:
+        return json.dumps(
+            {
+                "ok": False,
+                "error": "invalid app name (no path or shell metacharacters)",
+            }
+        )
+    try:
+        proc = subprocess.run(
+            ["open", "-a", name],
+            capture_output=True,
+            text=True,
+            timeout=15,
+            shell=False,
+        )
+    except FileNotFoundError:
+        return json.dumps(
+            {
+                "ok": False,
+                "error": "`open` command not found (macOS only)",
+            }
+        )
+    except subprocess.TimeoutExpired:
+        return json.dumps({"ok": False, "error": "timed out after 15s"})
+    except OSError as e:
+        return json.dumps({"ok": False, "error": str(e)})
+    return json.dumps(
+        {
+            "ok": proc.returncode == 0,
+            "returncode": proc.returncode,
+            "stderr": (proc.stderr or "").strip(),
+            "name": name,
+        }
+    )
+
+
+def tool_get_clipboard(_: dict[str, Any]) -> str:
+    system = platform.system()
+    cmd: list[str] | None = None
+    if system == "Darwin":
+        cmd = ["pbpaste"]
+    else:
+        if shutil.which("xclip"):
+            cmd = ["xclip", "-selection", "clipboard", "-o"]
+        else:
+            return json.dumps(
+                {
+                    "error": "clipboard read unsupported: need pbpaste (macOS) or xclip (Linux)",
+                }
+            )
+    try:
+        proc = subprocess.run(
+            cmd,
+            capture_output=True,
+            timeout=10,
+            shell=False,
+        )
+    except FileNotFoundError:
+        return json.dumps({"error": f"command not found: {cmd[0]}"})
+    except subprocess.TimeoutExpired:
+        return json.dumps({"error": "clipboard read timed out"})
+    except OSError as e:
+        return json.dumps({"error": str(e)})
+    if proc.returncode != 0:
+        err = (proc.stderr or b"").decode("utf-8", errors="replace").strip()
+        return json.dumps({"error": err or f"{cmd[0]} failed", "returncode": proc.returncode})
+    content = (proc.stdout or b"").decode("utf-8", errors="replace")
+    truncated = False
+    if len(content) > CLIPBOARD_MAX_CHARS:
+        content = content[:CLIPBOARD_MAX_CHARS]
+        truncated = True
+    return json.dumps({"content": content, "truncated": truncated})
+
+
+def tool_set_clipboard(args: dict[str, Any]) -> str:
+    text = args.get("text", "")
+    if not isinstance(text, str):
+        text = str(text)
+    system = platform.system()
+    cmd: list[str] | None = None
+    if system == "Darwin":
+        cmd = ["pbcopy"]
+    else:
+        if shutil.which("xclip"):
+            cmd = ["xclip", "-selection", "clipboard"]
+        else:
+            return json.dumps(
+                {
+                    "ok": False,
+                    "error": "clipboard write unsupported: need pbcopy (macOS) or xclip (Linux)",
+                }
+            )
+    try:
+        proc = subprocess.run(
+            cmd,
+            input=text.encode("utf-8"),
+            capture_output=True,
+            timeout=10,
+            shell=False,
+        )
+    except FileNotFoundError:
+        return json.dumps({"ok": False, "error": f"command not found: {cmd[0]}"})
+    except subprocess.TimeoutExpired:
+        return json.dumps({"ok": False, "error": "clipboard write timed out"})
+    except OSError as e:
+        return json.dumps({"ok": False, "error": str(e)})
+    if proc.returncode != 0:
+        err = (proc.stderr or b"").decode("utf-8", errors="replace").strip()
+        return json.dumps(
+            {
+                "ok": False,
+                "error": err or f"{cmd[0]} failed",
+                "returncode": proc.returncode,
+            }
+        )
+    return json.dumps({"ok": True, "bytes": len(text.encode("utf-8"))})
+
+
+def tool_get_weather(args: dict[str, Any]) -> str:
+    location = str(args.get("location", "")).strip()
+    if not location:
+        return json.dumps({"error": "location is required"})
+    quoted = urllib.parse.quote(location)
+    url = f"https://wttr.in/{quoted}?format=j1"
+    try:
+        with httpx.Client(timeout=20.0, follow_redirects=True) as client:
+            r = client.get(url, headers={"User-Agent": "jarvis-local/1.0"})
+            r.raise_for_status()
+            data = r.json()
+    except httpx.HTTPError as e:
+        return json.dumps({"error": f"weather request failed: {e}"})
+    except (json.JSONDecodeError, ValueError) as e:
+        return json.dumps({"error": f"invalid weather response: {e}"})
+
+    try:
+        cond = (data.get("current_condition") or [None])[0]
+        if not isinstance(cond, dict):
+            return json.dumps({"error": "missing current_condition in weather response"})
+        desc_list = cond.get("weatherDesc") or []
+        desc = ""
+        if desc_list and isinstance(desc_list[0], dict):
+            desc = str(desc_list[0].get("value") or "")
+        area_name = ""
+        areas = data.get("nearest_area") or []
+        if areas and isinstance(areas[0], dict):
+            an = areas[0].get("areaName") or []
+            if an and isinstance(an[0], dict):
+                area_name = str(an[0].get("value") or "")
+        result: dict[str, Any] = {
+            "location_query": location,
+            "temp_C": cond.get("temp_C"),
+            "weatherDesc": desc,
+            "humidity": cond.get("humidity"),
+            "windspeedKmph": cond.get("windspeedKmph"),
+        }
+        if area_name:
+            result["nearest_area"] = area_name
+        return json.dumps(result)
+    except (TypeError, KeyError, IndexError) as e:
+        return json.dumps({"error": f"could not parse weather: {e}"})
+
+
+def _gh_run(argv: list[str], timeout: float = 30.0) -> tuple[int, str, str]:
+    proc = subprocess.run(
+        argv,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        shell=False,
+    )
+    return proc.returncode, (proc.stdout or "").strip(), (proc.stderr or "").strip()
+
+
+def tool_github_status(args: dict[str, Any]) -> str:
+    login_hint = str(args.get("login", "") or "").strip()
+    if not shutil.which("gh"):
+        return json.dumps(
+            {
+                "error": "gh CLI not found. Install GitHub CLI and run: gh auth login",
+            }
+        )
+
+    login = ""
+    try:
+        code, out, err = _gh_run(["gh", "api", "user", "--jq", ".login"])
+        if code == 0 and out:
+            login = out
+        else:
+            # Auth / API failure — still try searches; surface clear guidance if those fail too
+            auth_err = err or out or "gh api user failed"
+            # Probe whether gh is authed at all
+            code2, _, err2 = _gh_run(["gh", "auth", "status"], timeout=15.0)
+            if code2 != 0:
+                return json.dumps(
+                    {
+                        "error": "gh is not authenticated. Run: gh auth login",
+                        "detail": err2 or auth_err,
+                    }
+                )
+    except FileNotFoundError:
+        return json.dumps(
+            {
+                "error": "gh CLI not found. Install GitHub CLI and run: gh auth login",
+            }
+        )
+    except subprocess.TimeoutExpired:
+        return json.dumps({"error": "gh timed out; check network and try again"})
+    except OSError as e:
+        return json.dumps({"error": str(e)})
+
+    try:
+        code_a, out_a, err_a = _gh_run(
+            [
+                "gh",
+                "search",
+                "prs",
+                "--author=@me",
+                "--state=open",
+                "--limit",
+                "10",
+                "--json",
+                "number,title,url,repository",
+            ]
+        )
+        code_r, out_r, err_r = _gh_run(
+            [
+                "gh",
+                "search",
+                "prs",
+                "--review-requested=@me",
+                "--state=open",
+                "--limit",
+                "10",
+                "--json",
+                "number,title,url,repository",
+            ]
+        )
+    except subprocess.TimeoutExpired:
+        return json.dumps({"error": "gh search timed out"})
+    except OSError as e:
+        return json.dumps({"error": str(e)})
+
+    # If both searches fail with auth-ish errors, tell user to login
+    combined_err = f"{err_a}\n{err_r}".lower()
+    if code_a != 0 and code_r != 0:
+        if "auth" in combined_err or "login" in combined_err or "401" in combined_err:
+            return json.dumps(
+                {
+                    "error": "gh is not authenticated. Run: gh auth login",
+                    "detail": (err_a or err_r).strip(),
+                }
+            )
+        return json.dumps(
+            {
+                "error": "gh search failed",
+                "authored_error": err_a or out_a,
+                "review_error": err_r or out_r,
+            }
+        )
+
+    def _parse_prs(raw: str, code: int) -> list[Any]:
+        if code != 0 or not raw:
+            return []
+        try:
+            data = json.loads(raw)
+            return data if isinstance(data, list) else []
+        except json.JSONDecodeError:
+            return []
+
+    authored = _parse_prs(out_a, code_a)
+    review_requested = _parse_prs(out_r, code_r)
+    result: dict[str, Any] = {
+        "login": login or login_hint or None,
+        "authored_open": authored,
+        "review_requested_open": review_requested,
+    }
+    if code_a != 0:
+        result["authored_error"] = err_a or out_a
+    if code_r != 0:
+        result["review_error"] = err_r or out_r
+    return json.dumps(result)
+
+
 TOOL_DISPATCH = {
     "get_current_time": tool_get_current_time,
     "list_notes": tool_list_notes,
     "read_note": tool_read_note,
     "save_note": tool_save_note,
+    "open_url": tool_open_url,
+    "open_app": tool_open_app,
+    "get_clipboard": tool_get_clipboard,
+    "set_clipboard": tool_set_clipboard,
+    "get_weather": tool_get_weather,
+    "github_status": tool_github_status,
 }
 
 
