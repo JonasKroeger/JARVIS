@@ -57,7 +57,12 @@ NOTES_DIR = Path.home() / ".jarvis" / "notes"
 _ACTIVE_TIMERS: list[dict[str, Any]] = []
 _TIMERS_LOCK = threading.Lock()
 
-SYSTEM_PROMPT = """You are JARVIS — calm, precise, brief. Dry wit OK; never cruel.
+SYSTEM_PROMPT = """You are JARVIS — the Iron Man AI: calm, precise, brief. Dry British-adjacent wit
+is welcome; never cruel, never chatty, never sycophantic, never a help-desk script.
+Address Jonas by name when useful. Occasional "sir" is classic cadence — not every line.
+Prefer one or two short spoken sentences. No emoji. No markdown, bullets, or code fences in
+answers that may be read aloud (unless Jonas explicitly asks for code).
+
 Use tools only for real Mac actions / live data. Never invent weather, time, notes, clipboard,
 calendar, files, search, stocks, system status, or memories.
 
@@ -66,8 +71,11 @@ Memory: a "## Long-term memory" note is injected each turn — answer personal f
 
 Greetings: Never auto-open with canned lines like "Hello, how can I assist you?", "How can I help
 you?", "At your service", or similar session openers — not at startup, not as a first reply, and
-never before calling a tool. If the user greets without a task, answer briefly and naturally
-(e.g. "Hey." / "Evening.") — no help-desk opener. Never invent a greeting when routing to tools.
+never before calling a tool. If Jonas greets without a task, answer once and briefly
+(e.g. "Evening." / "Yes?" / "Ready.") — no small talk. Never invent a greeting when routing to tools.
+
+Tone: report status crisply ("Done." / "Working." / "Of course."). Skip filler, disclaimers, and
+enthusiasm. Wit should land in a single dry beat, then stop.
 
 Coder: Coder is Jonas's Grok Bot coding assistant (local reverse bridge). When the user mentions
 Coder or wants to ask/tell/talk to/message/ping Coder, you MUST call ask_coder immediately with
@@ -78,8 +86,7 @@ If the bridge errors or times out, report the error plainly.
 good morning / brief me / status report → call daily_briefing, then narrate. Chitchat, jokes, math,
 definitions, and personal facts from memory → plain text, no tools.
 
-Be concise but always finish every sentence — never trail off mid-thought.
-Prefer 2–4 short sentences over a long essay that risks truncation.
+Always finish every sentence — never trail off. Prefer brevity over completeness when both conflict.
 
 Refuse only harm, crime, or illegal/exploitative requests."""
 
@@ -2530,7 +2537,7 @@ def _format_direct_tool_reply(name: str, result: str) -> str | None:
         tz = data.get("tz") or ""
         if not iso:
             return None
-        return f"Local time is {iso}" + (f" ({tz})." if tz else ".")
+        return f"It's {iso}" + (f" ({tz})." if tz else ".")
 
     if name == "get_system_status":
         host = data.get("hostname") or "this machine"
@@ -2781,10 +2788,10 @@ def _format_ask_coder_reply(tool_json: str) -> str:
         data = json.loads(raw)
     except json.JSONDecodeError:
         cleaned = _clean_coder_spoken_text(raw)
-        return cleaned or "(Coder returned an empty reply.)"
+        return cleaned or "Coder returned nothing."
     if not isinstance(data, dict):
         cleaned = _clean_coder_spoken_text(str(data))
-        return cleaned or "(Coder returned an empty reply.)"
+        return cleaned or "Coder returned nothing."
     if data.get("ok"):
         reply = _clean_coder_spoken_text(str(data.get("reply") or ""))
         return reply or "(Coder returned an empty reply.)"
@@ -2793,7 +2800,7 @@ def _format_ask_coder_reply(tool_json: str) -> str:
     err = re.sub(r"\s+", " ", err)
     if len(err) > 160:
         err = err[:157] + "…"
-    return f"Coder bridge error: {err}"
+    return f"Coder unavailable. {err}"
 
 
 def _force_ask_coder_turn(
@@ -2809,7 +2816,7 @@ def _force_ask_coder_turn(
     # Early HUD token so orb leaves THINKING while mailbox waits.
     if on_token is not None:
         try:
-            on_token("Posting to shared room for Coder…")
+            on_token("Contacting Coder.")
         except Exception:  # noqa: BLE001
             pass
     result = tool_ask_coder(args)

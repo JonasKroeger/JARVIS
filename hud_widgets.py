@@ -77,11 +77,11 @@ QWidget#titleBar {{
     border: none;
 }}
 QLabel#wordmark {{
-    color: rgba(61, 224, 255, 70);
+    color: rgba(61, 224, 255, 85);
     font-family: {MONO};
     font-size: 9px;
     font-weight: 600;
-    letter-spacing: 8px;
+    letter-spacing: 10px;
 }}
 QPushButton#winClose, QPushButton#winMin {{
     background: transparent;
@@ -213,6 +213,16 @@ class HudRoot(QWidget):
         painter.drawLine(QPointF(m + 4, m + 4), QPointF(m + 10, m + 4))
         painter.drawLine(QPointF(w - m - 10, m + 4), QPointF(w - m - 4, m + 4))
 
+        # Restrained holographic scanlines (Stark glass, not CRT noise)
+        painter.setPen(Qt.PenStyle.NoPen)
+        for y in range(0, h, 3):
+            a = 7 if (y // 3) % 2 == 0 else 3
+            painter.fillRect(0, y, w, 1, QColor(61, 224, 255, a))
+
+        # Faint gold baseline under the field
+        painter.setPen(QPen(QColor(212, 168, 75, 28), 1.0))
+        painter.drawLine(QPointF(m + L + 8, h - m), QPointF(w - m - L - 8, h - m))
+
         painter.end()
 
 
@@ -318,15 +328,19 @@ class StatusChip(QWidget):
             for k in (
                 "listen",
                 "think",
+                "comput",
                 "speak",
                 "synth",
+                "formulat",
                 "transcrib",
                 "process",
                 "contact",
+                "relay",
                 "boot",
+                "initializ",
             )
         )
-        self._danger = "error" in lower
+        self._danger = "error" in lower or "fault" in lower or "unclear" in lower
         self.update()
         self.updateGeometry()
 
@@ -533,7 +547,7 @@ class OrbVisualizer(QWidget):
         self.setMinimumSize(360, 360)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.setToolTip("Hold to speak · release to send")
+        self.setToolTip("Hold to speak · release to transmit")
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
         self._state = self.IDLE
@@ -575,29 +589,29 @@ class OrbVisualizer(QWidget):
 
     def _tick(self) -> None:
         speed = {
-            self.IDLE: 0.018,
+            self.IDLE: 0.028,
             self.LISTENING: 0.075,
             self.THINKING: 0.14,
             self.SPEAKING: 0.095,
-        }.get(self._state, 0.018)
+        }.get(self._state, 0.028)
         wave_speed = {
-            self.IDLE: 0.028,
+            self.IDLE: 0.038,
             self.LISTENING: 0.08,
             self.THINKING: 0.12,
             self.SPEAKING: 0.09,
-        }.get(self._state, 0.028)
+        }.get(self._state, 0.038)
         rot_speed = {
-            self.IDLE: 0.18,
+            self.IDLE: 0.28,
             self.LISTENING: 0.7,
             self.THINKING: 1.55,
             self.SPEAKING: 0.95,
-        }.get(self._state, 0.18)
+        }.get(self._state, 0.28)
         sweep_speed = {
-            self.IDLE: 0.6,
+            self.IDLE: 0.85,
             self.LISTENING: 2.2,
             self.THINKING: 4.0,
             self.SPEAKING: 2.8,
-        }.get(self._state, 0.6)
+        }.get(self._state, 0.85)
         self._phase = (self._phase + speed) % (math.pi * 2)
         self._wave = (self._wave + wave_speed) % (math.pi * 2)
         self._rot = (self._rot + rot_speed) % 360.0
@@ -628,10 +642,10 @@ class OrbVisualizer(QWidget):
                 1.12,
             )
         return (
-            QColor(50, 195, 225),
-            QColor(0, 155, 195),
-            QColor(180, 140, 60),
-            0.70,
+            QColor(55, 205, 235),
+            QColor(20, 170, 210),
+            QColor(200, 155, 70),
+            0.82,
         )
 
     # —— Interaction ——
@@ -830,40 +844,57 @@ class OrbVisualizer(QWidget):
 
         # Core rim — dual stroke (cyan + soft gold tick)
         rim = QColor(primary)
-        rim.setAlpha(_a(210 * alpha_scale))
-        painter.setPen(QPen(rim, 1.7))
+        rim.setAlpha(_a(220 * alpha_scale))
+        painter.setPen(QPen(rim, 1.85))
         painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.drawEllipse(QPointF(cx, cy), core_r, core_r)
         # Outer hairline
         rim2 = QColor(primary)
-        rim2.setAlpha(_a(60 * alpha_scale))
-        painter.setPen(QPen(rim2, 0.8))
+        rim2.setAlpha(_a(70 * alpha_scale))
+        painter.setPen(QPen(rim2, 0.85))
         painter.drawEllipse(QPointF(cx, cy), core_r + 3.5, core_r + 3.5)
 
-        # Gold accent ticks on core (listening / always subtle)
-        tick_a = _a((140 if self._state == self.LISTENING else 45) * alpha_scale)
-        painter.setPen(QPen(_q(C_GOLD, tick_a), 1.4))
+        # Concentric arc-reactor energy rings (restrained)
+        for frac, wa, width in (
+            (0.72, 55, 1.1),
+            (0.48, 80, 1.35),
+            (0.28, 110, 1.6),
+        ):
+            er = core_r * frac * (0.98 + 0.02 * pulse)
+            ec = QColor(primary)
+            ec.setAlpha(_a(wa * alpha_scale))
+            painter.setPen(QPen(ec, width))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawEllipse(QPointF(cx, cy), er, er)
+
+        # Rotating gold reactor chevrons (always on, stronger when listening)
+        tick_a = _a((155 if self._state == self.LISTENING else 70) * alpha_scale)
+        painter.setPen(QPen(_q(C_GOLD, tick_a), 1.45))
         for s in range(6):
-            ang = math.radians(60 * s - 90 + self._rot * 0.06)
+            ang = math.radians(60 * s - 90 + self._rot * 0.08)
             r0 = core_r + 1.0
-            r1 = core_r + (7.0 if self._state == self.LISTENING else 4.5)
+            r1 = core_r + (7.5 if self._state == self.LISTENING else 5.2)
             painter.drawLine(
                 QPointF(cx + math.cos(ang) * r0, cy + math.sin(ang) * r0),
                 QPointF(cx + math.cos(ang) * r1, cy + math.sin(ang) * r1),
             )
 
-        # Inner bright pip (reactor core)
-        pip_r = 2.6 + 1.6 * pulse
-        pip_glow = QRadialGradient(QPointF(cx, cy), pip_r * 3.2)
+        # Inner bright pip (reactor core) — hotter glow
+        pip_r = 3.0 + 1.8 * pulse
+        pip_glow = QRadialGradient(QPointF(cx, cy), pip_r * 3.8)
         pg = QColor(C_CYAN_GLOW)
-        pg.setAlpha(_a(180 * alpha_scale))
+        pg.setAlpha(_a(210 * alpha_scale))
         pip_glow.setColorAt(0.0, pg)
-        pip_glow.setColorAt(0.4, QColor(61, 224, 255, _a(80 * alpha_scale)))
+        pip_glow.setColorAt(0.35, QColor(122, 240, 255, _a(110 * alpha_scale)))
+        pip_glow.setColorAt(0.7, QColor(61, 224, 255, _a(35 * alpha_scale)))
         pip_glow.setColorAt(1.0, QColor(0, 0, 0, 0))
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(pip_glow)
-        painter.drawEllipse(QPointF(cx, cy), pip_r * 3.0, pip_r * 3.0)
-        painter.setBrush(_q(C_CYAN_GLOW, 220 * alpha_scale))
+        painter.drawEllipse(QPointF(cx, cy), pip_r * 3.4, pip_r * 3.4)
+        # Hot white-cyan core
+        painter.setBrush(_q("#e8fbff", 235 * alpha_scale))
+        painter.drawEllipse(QPointF(cx, cy), pip_r * 0.55, pip_r * 0.55)
+        painter.setBrush(_q(C_CYAN_GLOW, 230 * alpha_scale))
         painter.drawEllipse(QPointF(cx, cy), pip_r, pip_r)
 
         painter.end()
@@ -923,9 +954,9 @@ class OrbVisualizer(QWidget):
     ) -> None:
         """Single soft rotating sweep wedge — restrained radar feel."""
         if self._state == self.IDLE:
-            span = 28.0
-            r = radius * 1.28
-            a_mul = 0.35
+            span = 32.0
+            r = radius * 1.30
+            a_mul = 0.48
             col = primary
         elif self._state == self.LISTENING:
             span = 42.0

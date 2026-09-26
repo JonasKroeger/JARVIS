@@ -63,13 +63,13 @@ except ImportError:
 SAMPLE_RATE = 16000
 
 VOICE_HINT = (
-    "The user may speak via microphone; reply in clear, conversational sentences. "
-    "Avoid markdown, bullet lists, and code blocks unless they ask for code — "
-    "your answer may be read aloud. Be concise (2–4 short sentences) but always "
-    "finish every sentence — never trail off mid-thought. "
-    "Never auto-open with canned lines like 'Hello, how can I assist you?' — "
-    "not at session start and never before a tool call. If they just greet you, "
-    "answer briefly and naturally. Mentions of Coder → ask_coder with no preamble."
+    "Spoken path: answer like movie JARVIS — calm, precise, dry wit; never chatty "
+    "or sycophantic. Prefer one or two short sentences. No emoji, markdown, bullets, "
+    "or code fences unless Jonas asks for code. Address Jonas by name when useful; "
+    "occasional 'sir' is fine, not every line. Finish every sentence. "
+    "Never open with canned lines like 'Hello, how can I assist you?' — not at "
+    "session start and never before a tool call. A bare greeting → one clipped beat "
+    "('Evening.' / 'Yes?' / 'Ready.'). Mentions of Coder → ask_coder with no preamble."
 )
 
 _DEBUG_LOG = Path(__file__).resolve().parent / "jarvis-debug.log"
@@ -215,7 +215,7 @@ class JarvisWindow(QMainWindow):
         # Ghost text entry — hidden until /
         self._entry = QLineEdit()
         self._entry.setObjectName("ghostInput")
-        self._entry.setPlaceholderText("Type a message…  (Esc to hide)")
+        self._entry.setPlaceholderText("Command…  (Esc to dismiss)")
         self._entry.returnPressed.connect(self._send_text)
         self._entry.hide()
         outer.addWidget(self._entry)
@@ -241,25 +241,27 @@ class JarvisWindow(QMainWindow):
         lower = text.lower()
         if "listening" in lower:
             display = "LISTENING"
-        elif "synthesiz" in lower:
-            display = "SYNTHESIZING"
-        elif "contacting" in lower:
-            display = "CONTACTING CODER"
-        elif "thinking" in lower:
-            display = "THINKING"
+        elif "synthesiz" in lower or "formulat" in lower:
+            display = "FORMULATING"
+        elif "contacting" in lower or "relaying" in lower:
+            display = "RELAY"
+        elif "thinking" in lower or "comput" in lower:
+            display = "COMPUTING"
         elif "transcrib" in lower:
-            display = "TRANSCRIBING"
+            display = "PROCESSING"
         elif "processing" in lower:
             display = "PROCESSING"
         elif "speaking" in lower:
             display = "SPEAKING"
         elif "ollama ready" in lower or "online" in lower:
             display = "ONLINE"
-        elif "checking" in lower:
-            display = "BOOTING…"
+        elif "checking" in lower or "boot" in lower or "initializ" in lower:
+            display = "INITIALIZING"
+        elif "audio unclear" in lower or "didn't catch" in lower or "didnt catch" in lower:
+            display = "AUDIO UNCLEAR"
         elif "error" in lower:
-            display = "ERROR"
-        elif "cannot" in lower or "missing" in lower:
+            display = "FAULT"
+        elif "cannot" in lower or "missing" in lower or "unavailable" in lower:
             display = "STANDBY"
         elif text.upper().startswith("SYS"):
             display = text.split("//", 1)[-1].strip() or "STANDBY"
@@ -274,11 +276,15 @@ class JarvisWindow(QMainWindow):
             k in lower
             for k in (
                 "thinking",
+                "comput",
+                "formulat",
                 "synthesiz",
                 "transcrib",
                 "processing",
-                "booting",
+                "boot",
+                "initializ",
                 "contacting",
+                "relay",
             )
         ):
             state = OrbVisualizer.THINKING
@@ -374,7 +380,7 @@ class JarvisWindow(QMainWindow):
         self._busy = True
         self._stream_active = False
         self._stream_buf = ""
-        self._set_status("THINKING")
+        self._set_status("COMPUTING")
 
         self._worker = OllamaWorker(self._model, list(self._messages), text, self)
         self._worker.token.connect(self._on_ollama_token)
@@ -389,9 +395,9 @@ class JarvisWindow(QMainWindow):
             self._stream_active = True
             self._stream_buf = ""
             if "contacting coder" in delta.lower():
-                self._set_status("CONTACTING CODER")
+                self._set_status("RELAY")
             else:
-                self._set_status("SYNTHESIZING")
+                self._set_status("FORMULATING")
         self._stream_buf += delta
 
     def _on_ollama_ok(self, msgs: list, reply: str) -> None:
@@ -418,8 +424,8 @@ class JarvisWindow(QMainWindow):
         self._busy = False
         self._stream_active = False
         self._stream_buf = ""
-        self._captions.show_reply(f"(Error: {err})")
-        self._set_status("ERROR")
+        self._captions.show_reply(f"Fault: {err}")
+        self._set_status("FAULT")
 
     # —— Mic / hold-to-talk ——
     def _mic_press(self) -> None:
@@ -476,7 +482,7 @@ class JarvisWindow(QMainWindow):
         if text:
             self._submit_user_message(text)
         else:
-            self._set_status("Didn't catch that")
+            self._set_status("AUDIO UNCLEAR")
             QTimer.singleShot(1800, lambda: self._set_status(self._ready_status))
 
     def _on_transcribe_err(self, err: str) -> None:
