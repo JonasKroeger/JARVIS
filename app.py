@@ -202,8 +202,10 @@ class JarvisWindow(QMainWindow):
         self._orb.hold_ended.connect(self._mic_release)
         outer.addWidget(self._orb, stretch=1)
 
-        # Status is silent — orb brightness/pulse only (compat shim kept off-layout)
-        self._ring_caption = StatusChip()
+        # Status is silent — orb brightness/pulse only (compat shim kept off-layout).
+        # Must parent to this window — an unparented StatusChip becomes a rogue
+        # top-level Qt window and steals key focus (breaks / ghost text + Space).
+        self._ring_caption = StatusChip(self)
         self._ring_caption.hide()
 
         self._captions = CaptionStack()
@@ -213,18 +215,22 @@ class JarvisWindow(QMainWindow):
         self._entry = QLineEdit()
         self._entry.setObjectName("ghostInput")
         self._entry.setPlaceholderText("")
+        self._entry.setMinimumHeight(40)
         self._entry.returnPressed.connect(self._send_text)
         self._entry.hide()
         outer.addWidget(self._entry)
 
         self.setStyleSheet(HUD_STYLESHEET)
 
-        # Keyboard: Space = hold-to-talk; / = ghost input
-        self._sc_slash = QShortcut(QKeySequence("/"), self)
+        # Keyboard: Space = hold-to-talk; / = ghost input (shortcut + keyPressEvent)
+        self._sc_slash = QShortcut(QKeySequence(Qt.Key.Key_Slash), self)
+        self._sc_slash.setContext(Qt.ShortcutContext.WindowShortcut)
         self._sc_slash.activated.connect(self._show_ghost_input)
-        self._sc_esc = QShortcut(QKeySequence("Escape"), self)
+        self._sc_esc = QShortcut(QKeySequence(Qt.Key.Key_Escape), self)
+        self._sc_esc.setContext(Qt.ShortcutContext.WindowShortcut)
         self._sc_esc.activated.connect(self._hide_ghost_input)
 
+        QTimer.singleShot(0, self._orb.setFocus)
         QTimer.singleShot(100, self._check_ollama)
 
     # —— Status / orb ——
@@ -347,14 +353,19 @@ class JarvisWindow(QMainWindow):
         threading.Thread(target=_warm, daemon=True).start()
 
     def _show_ghost_input(self) -> None:
+        if self._entry.isVisible():
+            self._entry.setFocus()
+            return
+        self._sc_slash.setEnabled(False)  # allow typing '/' inside the field
         self._entry.show()
-        self._entry.setFocus()
+        self._entry.setFocus(Qt.FocusReason.ShortcutFocusReason)
         self._entry.selectAll()
 
     def _hide_ghost_input(self) -> None:
         self._entry.clear()
         self._entry.hide()
-        self._orb.setFocus()
+        self._sc_slash.setEnabled(True)
+        self._orb.setFocus(Qt.FocusReason.OtherFocusReason)
 
     def _send_text(self) -> None:
         if self._busy:
@@ -364,6 +375,8 @@ class JarvisWindow(QMainWindow):
             return
         self._entry.clear()
         self._entry.hide()
+        self._sc_slash.setEnabled(True)
+        self._orb.setFocus(Qt.FocusReason.OtherFocusReason)
         self._submit_user_message(text)
 
     def _submit_user_message(self, text: str) -> None:
@@ -487,11 +500,15 @@ class JarvisWindow(QMainWindow):
         QMessageBox.critical(self, "JARVIS", err)
 
     def keyPressEvent(self, event) -> None:  # noqa: N802
-        if (
-            event.key() == Qt.Key.Key_Space
-            and not event.isAutoRepeat()
-            and not self._entry.isVisible()
-        ):
+        if self._entry.isVisible():
+            super().keyPressEvent(event)
+            return
+        key = event.key()
+        if key == Qt.Key.Key_Slash and not event.isAutoRepeat():
+            self._show_ghost_input()
+            event.accept()
+            return
+        if key == Qt.Key.Key_Space and not event.isAutoRepeat():
             self._space_held = True
             self._mic_press()
             event.accept()

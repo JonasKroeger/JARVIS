@@ -113,9 +113,9 @@ QLabel#hintLabel {{
     background: transparent;
 }}
 QLineEdit#ghostInput {{
-    background: rgba(8, 14, 22, 140);
+    background: rgba(8, 14, 22, 175);
     color: {C_TEXT};
-    border: 1px solid rgba(122, 232, 255, 35);
+    border: 1px solid rgba(122, 232, 255, 70);
     border-radius: 16px;
     padding: 10px 16px;
     selection-background-color: #1a3a50;
@@ -123,8 +123,8 @@ QLineEdit#ghostInput {{
     font-size: 13px;
 }}
 QLineEdit#ghostInput:focus {{
-    border: 1px solid rgba(122, 232, 255, 90);
-    background: rgba(10, 18, 28, 170);
+    border: 1px solid rgba(122, 232, 255, 120);
+    background: rgba(10, 18, 28, 200);
 }}
 QMessageBox {{
     background: {C_BG};
@@ -248,12 +248,17 @@ class StatusStrip(QWidget):
 
 
 class StatusChip(QWidget):
-    """Compat shim — status is silent (orb brightness only)."""
+    """Compat shim — status is silent (orb brightness only).
+
+    Always expects a parent. If constructed without one, stay hidden and
+    attribute-less so we never spawn a rogue top-level focus window.
+    """
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setFixedHeight(0)
         self.setMaximumHeight(0)
+        self.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen, True)
         self.hide()
         self._text = ""
 
