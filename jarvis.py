@@ -45,9 +45,9 @@ FETCH_URL_HARD_MAX = 100_000
 
 # Speed / context caps (lean path toward ≤1s first tokens)
 MAX_MODEL_HISTORY = 10  # non-system msgs sent to Ollama (full session kept in UI)
-NO_TOOLS_NUM_PREDICT = 80
-TOOLS_DECISION_NUM_PREDICT = 256
-TOOLS_NARRATE_NUM_PREDICT = 96
+NO_TOOLS_NUM_PREDICT = 320
+TOOLS_DECISION_NUM_PREDICT = 128
+TOOLS_NARRATE_NUM_PREDICT = 256
 KEEP_ALIVE = "30m"
 FAST_TEMPERATURE = 0.3
 
@@ -66,6 +66,9 @@ Memory: a "## Long-term memory" note is injected each turn — answer personal f
 
 good morning / brief me / status report → call daily_briefing, then narrate. Chitchat, jokes, math,
 definitions, and personal facts from memory → plain text, no tools.
+
+Be concise but always finish every sentence — never trail off mid-thought.
+Prefer 2–4 short sentences over a long essay that risks truncation.
 
 Refuse only harm, crime, or illegal/exploitative requests."""
 

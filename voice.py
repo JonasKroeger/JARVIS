@@ -22,8 +22,16 @@ _whisper_lock = threading.Lock()
 # Flash model for lower latency; override with ELEVENLABS_MODEL_ID if needed.
 DEFAULT_ELEVENLABS_VOICE_ID = "onwK4e9ZLuTAKqWW03F9"
 DEFAULT_ELEVENLABS_MODEL_ID = "eleven_flash_v2_5"
-DEFAULT_ELEVENLABS_MAX_CHARS = 400
+# Per-request chunk size (not a hard reply cap). Full replies are spoken via
+# sequential sentence-boundary chunks so the first audio starts quickly.
+DEFAULT_ELEVENLABS_MAX_CHARS = 1600
 ELEVENLABS_TTS_URL = "https://api.elevenlabs.io/v1/text-to-speech/{voice_id}"
+
+# Cancel mid-utterance / mid-chunk-queue when a newer speak starts or cancel_speak().
+_speak_lock = threading.Lock()
+_speak_generation = 0
+_active_proc: subprocess.Popen | None = None
+_SENTENCE_SPLIT = re.compile(r"(?<=[.!?])\s+")
 
 
 def text_for_speech(text: str) -> str:
@@ -45,13 +53,97 @@ def _max_tts_chars() -> int:
     return DEFAULT_ELEVENLABS_MAX_CHARS
 
 
-def _truncate_for_tts(safe: str) -> str:
-    """Keep spoken audio short so TTS starts sooner; full text stays in chat."""
-    limit = _max_tts_chars()
+def cancel_speak() -> None:
+    """Invalidate in-flight TTS (new user turn). Safe to call from the GUI thread."""
+    global _speak_generation, _active_proc
+    with _speak_lock:
+        _speak_generation += 1
+        proc = _active_proc
+        _active_proc = None
+    if proc is not None and proc.poll() is None:
+        try:
+            proc.terminate()
+        except OSError:
+            pass
+
+
+def _current_speak_gen() -> int:
+    with _speak_lock:
+        return _speak_generation
+
+
+def _bump_speak_gen() -> int:
+    global _speak_generation
+    with _speak_lock:
+        _speak_generation += 1
+        return _speak_generation
+
+
+def _truncate_at_boundary(safe: str, limit: int) -> str:
+    """Hard-cap at a sentence (or word) boundary — never mid-word."""
     if len(safe) <= limit:
         return safe
-    cut = safe[:limit].rsplit(" ", 1)[0] or safe[:limit]
-    return cut.rstrip(",.;:") + "…"
+    window = safe[:limit]
+    # Prefer last sentence end inside the window
+    best = -1
+    for sep in (". ", "! ", "? ", ".\n", "!\n", "?\n"):
+        idx = window.rfind(sep)
+        if idx > best:
+            best = idx
+    if best >= max(8, limit // 6):
+        return window[: best + 1].rstrip()
+    # Fall back to last whitespace
+    cut = window.rsplit(" ", 1)[0] or window
+    return cut.rstrip(",;:")
+
+
+def _truncate_for_tts(safe: str) -> str:
+    """Legacy single-shot cap (sentence-boundary). Prefer _chunk_for_tts."""
+    return _truncate_at_boundary(safe, _max_tts_chars())
+
+
+def _chunk_for_tts(safe: str) -> list[str]:
+    """Split into speakable chunks at sentence boundaries under the char budget.
+
+    Speaks the full reply across sequential chunks (first chunk ASAP). Only
+    truncates a single oversize sentence at a word/sentence boundary.
+    """
+    limit = _max_tts_chars()
+    if not safe.strip():
+        return [" "]
+    if len(safe) <= limit:
+        return [safe]
+
+    sentences = _SENTENCE_SPLIT.split(safe)
+    chunks: list[str] = []
+    buf = ""
+    for sent in sentences:
+        sent = sent.strip()
+        if not sent:
+            continue
+        if len(sent) > limit:
+            if buf:
+                chunks.append(buf)
+                buf = ""
+            # Oversized sentence: pack word-boundary slices
+            rest = sent
+            while rest:
+                piece = _truncate_at_boundary(rest, limit)
+                if not piece:
+                    piece = rest[:limit]
+                chunks.append(piece)
+                rest = rest[len(piece) :].lstrip()
+            continue
+        candidate = f"{buf} {sent}".strip() if buf else sent
+        if len(candidate) <= limit:
+            buf = candidate
+        else:
+            if buf:
+                chunks.append(buf)
+            buf = sent
+    if buf:
+        chunks.append(buf)
+    return chunks or [safe[:limit]]
 
 
 def _load_env_files() -> None:
@@ -84,46 +176,68 @@ def _elevenlabs_api_key() -> str | None:
     return key or None
 
 
-def _speak_via_say(safe: str) -> None:
-    if sys.platform != "darwin":
+def _run_cancellable(cmd: list[str], gen: int) -> None:
+    """Run a player/say subprocess that cancel_speak() / newer gen can kill."""
+    global _active_proc
+    if gen != _current_speak_gen():
         return
     try:
-        subprocess.run(
-            ["/usr/bin/say", safe],
-            check=False,
-            capture_output=True,
-            timeout=600,
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
         )
-    except (OSError, subprocess.TimeoutExpired):
-        pass
-
-
-def _play_audio_file(path: Path) -> None:
-    """Play a local audio file; prefer afplay on macOS."""
-    if sys.platform == "darwin" and Path("/usr/bin/afplay").exists():
-        subprocess.run(
-            ["/usr/bin/afplay", str(path)],
-            check=False,
-            capture_output=True,
-            timeout=600,
-        )
+    except OSError:
         return
-    # Best-effort fallback: try ffplay / aplay if present
+    with _speak_lock:
+        if gen != _speak_generation:
+            try:
+                proc.terminate()
+            except OSError:
+                pass
+            return
+        _active_proc = proc
+    try:
+        proc.wait(timeout=600)
+    except subprocess.TimeoutExpired:
+        try:
+            proc.kill()
+        except OSError:
+            pass
+    finally:
+        with _speak_lock:
+            if _active_proc is proc:
+                _active_proc = None
+
+
+def _speak_via_say(safe: str, gen: int) -> None:
+    if sys.platform != "darwin":
+        return
+    _run_cancellable(["/usr/bin/say", safe], gen)
+
+
+def _play_audio_file(path: Path, gen: int) -> None:
+    """Play a local audio file; prefer afplay on macOS. Respects speak gen cancel."""
+    if sys.platform == "darwin" and Path("/usr/bin/afplay").exists():
+        _run_cancellable(["/usr/bin/afplay", str(path)], gen)
+        return
     for cmd in (
         ["ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet", str(path)],
         ["aplay", str(path)],
     ):
         try:
-            subprocess.run(cmd, check=False, capture_output=True, timeout=600)
+            _run_cancellable(cmd, gen)
             return
-        except (OSError, subprocess.TimeoutExpired):
+        except OSError:
             continue
 
 
-def _speak_via_elevenlabs(safe: str, api_key: str) -> bool:
+def _speak_via_elevenlabs(safe: str, api_key: str, gen: int) -> bool:
     """POST to ElevenLabs TTS and play the result. Returns True on success."""
     import httpx
 
+    if gen != _current_speak_gen():
+        return True  # cancelled — treat as handled (no say fallback)
     voice_id = (
         os.environ.get("ELEVENLABS_VOICE_ID", "").strip()
         or DEFAULT_ELEVENLABS_VOICE_ID
@@ -154,10 +268,12 @@ def _speak_via_elevenlabs(safe: str, api_key: str) -> bool:
             audio = resp.content
         if not audio:
             return False
+        if gen != _current_speak_gen():
+            return True
         with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as tmp:
             tmp_path = Path(tmp.name)
             tmp.write(audio)
-        _play_audio_file(tmp_path)
+        _play_audio_file(tmp_path, gen)
         return True
     except Exception:  # noqa: BLE001 — any EL failure → caller falls back to say
         return False
@@ -174,27 +290,38 @@ def speak_async(text: str, on_done: Callable[[], None] | None = None) -> None:
 
     Uses ElevenLabs when ELEVENLABS_API_KEY is set; otherwise (or on any
     ElevenLabs failure) falls back to macOS `/usr/bin/say`.
-    Spoken text is truncated (~ELEVENLABS_MAX_CHARS) so synthesis starts sooner;
-    the full reply remains in the chat UI.
+
+    Full replies are spoken via sequential sentence-boundary chunks (first chunk
+    ASAP). A newer speak_async or cancel_speak() invalidates the generation so
+    remaining chunks (and the active player) stop — used on a new user turn.
+    Same-turn chunk continuations share one generation and are not cancelled.
 
     Exceptions in the TTS thread are swallowed so they cannot kill the process.
     """
+    # Bump gen once for this utterance (cancels any previous speak_async).
+    gen = _bump_speak_gen()
 
     def run() -> None:
         try:
-            safe = _truncate_for_tts(text_for_speech(text))
+            safe = text_for_speech(text)
             if len(safe) > 32000:
-                safe = safe[:32000] + "…"
+                safe = _truncate_at_boundary(safe, 32000)
+            chunks = _chunk_for_tts(safe)
             api_key = _elevenlabs_api_key()
-            used_el = False
-            if api_key:
-                used_el = _speak_via_elevenlabs(safe, api_key)
-            if not used_el:
-                _speak_via_say(safe)
+            for chunk in chunks:
+                if gen != _current_speak_gen():
+                    break
+                used_el = False
+                if api_key:
+                    used_el = _speak_via_elevenlabs(chunk, api_key, gen)
+                if gen != _current_speak_gen():
+                    break
+                if not used_el:
+                    _speak_via_say(chunk, gen)
         except Exception:  # noqa: BLE001 — never let TTS kill the GUI process
             pass
         finally:
-            if on_done:
+            if on_done and gen == _current_speak_gen():
                 try:
                     on_done()
                 except Exception:  # noqa: BLE001

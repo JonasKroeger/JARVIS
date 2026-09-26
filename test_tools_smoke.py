@@ -651,5 +651,48 @@ class MemoryStoreTests(unittest.TestCase):
 
 
 
+
+class VoiceTtsChunkTests(unittest.TestCase):
+    def test_chunk_keeps_short_intact(self) -> None:
+        import voice
+
+        short = "The answer is forty-two."
+        self.assertEqual(voice._chunk_for_tts(short), [short])
+
+    def test_chunk_splits_on_sentences(self) -> None:
+        import voice
+
+        # Force small budget
+        with patch.dict("os.environ", {"ELEVENLABS_MAX_CHARS": "60"}, clear=False):
+            # Re-read limit via env each call
+            text = (
+                "First sentence ends here. Second sentence is also here. "
+                "Third wraps past the budget nicely."
+            )
+            chunks = voice._chunk_for_tts(text)
+        self.assertGreaterEqual(len(chunks), 2)
+        joined = " ".join(chunks)
+        for word in ("First", "Second", "Third", "budget"):
+            self.assertIn(word, joined)
+        for c in chunks:
+            self.assertLessEqual(len(c), 60)
+            # Never mid-word ellipsis from old truncator
+            self.assertFalse(c.endswith("…"))
+
+    def test_truncate_at_sentence_boundary(self) -> None:
+        import voice
+
+        text = "Alpha sentence one. Beta sentence two continues quite a bit further."
+        out = voice._truncate_at_boundary(text, 40)
+        self.assertTrue(out.endswith("."), msg=repr(out))
+        self.assertNotIn("Beta", out)
+        self.assertIn("Alpha", out)
+
+    def test_predict_caps_raised(self) -> None:
+        self.assertGreaterEqual(jarvis.NO_TOOLS_NUM_PREDICT, 256)
+        self.assertGreaterEqual(jarvis.TOOLS_NARRATE_NUM_PREDICT, 200)
+        self.assertLessEqual(jarvis.TOOLS_DECISION_NUM_PREDICT, 160)
+
+
 if __name__ == "__main__":
     unittest.main()

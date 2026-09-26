@@ -55,7 +55,9 @@ QWidget#titleBar {{
     background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
         stop:0 rgba(12, 18, 28, 240), stop:1 rgba(6, 10, 16, 220));
     border: none;
-    border-bottom: 1px solid {C_BORDER_BRIGHT};
+    border-bottom: 1px solid rgba(46, 85, 120, 120);
+    border-top-left-radius: 12px;
+    border-top-right-radius: 12px;
 }}
 QLabel#wordmark {{
     color: {C_CYAN};
@@ -96,8 +98,9 @@ QWidget#statusStripRoot {{
     background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
         stop:0 rgba(6, 12, 20, 220), stop:0.5 rgba(8, 14, 22, 200),
         stop:1 rgba(6, 12, 20, 220));
-    border: 1px solid {C_BORDER};
+    border: 1px solid rgba(46, 85, 120, 140);
     border-left: 2px solid {C_CYAN_SOFT};
+    border-radius: 10px;
 }}
 QLabel#statusStrip {{
     color: {C_MUTED};
@@ -128,11 +131,11 @@ QLabel#fieldLabel {{
     letter-spacing: 2.5px;
 }}
 QLabel#awaitWatermark {{
-    color: rgba(61, 224, 255, 38);
+    color: rgba(61, 224, 255, 42);
     font-family: {MONO};
-    font-size: 13px;
+    font-size: 12px;
     font-weight: 600;
-    letter-spacing: 6px;
+    letter-spacing: 5px;
     background: transparent;
 }}
 QTextEdit#chatLog {{
@@ -145,11 +148,12 @@ QTextEdit#chatLog {{
     font-size: 12px;
 }}
 QLineEdit#msgInput {{
-    background: #05080e;
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+        stop:0 #0a1018, stop:1 #05080e);
     color: {C_TEXT};
     border: 1px solid {C_BORDER};
-    border-radius: 2px;
-    padding: 11px 14px 11px 8px;
+    border-radius: 12px;
+    padding: 11px 16px 11px 14px;
     selection-background-color: #1a3a50;
     font-family: {MONO};
     font-size: 13px;
@@ -165,8 +169,8 @@ QLineEdit#modelInput {{
     background: #05080e;
     color: {C_TEXT};
     border: 1px solid {C_BORDER};
-    border-radius: 2px;
-    padding: 4px 8px;
+    border-radius: 10px;
+    padding: 5px 10px;
     selection-background-color: #1a3a50;
     font-family: {MONO};
     font-size: 10px;
@@ -176,24 +180,25 @@ QLineEdit#modelInput:focus {{
     border: 1px solid {C_CYAN_DIM};
 }}
 QPushButton#sendBtn {{
-    background: transparent;
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+        stop:0 rgba(61, 224, 255, 28), stop:1 rgba(61, 224, 255, 10));
     color: {C_CYAN};
     font-weight: 700;
     font-family: {MONO};
     font-size: 11px;
     letter-spacing: 3px;
-    padding: 10px 18px;
+    padding: 10px 22px;
     border: 1px solid {C_CYAN};
-    border-radius: 2px;
+    border-radius: 16px;
     min-width: 110px;
 }}
 QPushButton#sendBtn:hover {{
-    background: rgba(61, 224, 255, 40);
+    background: rgba(61, 224, 255, 55);
     color: #a8f4ff;
     border-color: #5aebff;
 }}
 QPushButton#sendBtn:pressed {{
-    background: rgba(61, 224, 255, 60);
+    background: rgba(61, 224, 255, 80);
 }}
 QPushButton#sendBtn:disabled {{
     color: #3a5060;
@@ -242,7 +247,7 @@ QCheckBox#speakBox::indicator {{
     width: 12px;
     height: 12px;
     border: 1px solid {C_BORDER};
-    border-radius: 2px;
+    border-radius: 4px;
     background: #05080e;
 }}
 QCheckBox#speakBox::indicator:checked {{
@@ -277,7 +282,7 @@ QMessageBox QPushButton {{
     background: #0c1522;
     color: {C_CYAN};
     border: 1px solid {C_CYAN_DIM};
-    border-radius: 2px;
+    border-radius: 10px;
     padding: 6px 16px;
     font-family: {MONO};
 }}
@@ -403,10 +408,13 @@ class HudRoot(QWidget):
         painter.drawLine(mid_x - 10, margin, mid_x + 10, margin)
         painter.drawLine(mid_x - 10, h - margin, mid_x + 10, h - margin)
 
-        # Thin outer frame accent
-        painter.setPen(QPen(QColor(26, 48, 72, 140), 1.0))
+        # Soft rounded outer frame accent (less boxy chrome)
+        painter.setPen(QPen(QColor(46, 85, 120, 120), 1.2))
         painter.setBrush(Qt.BrushStyle.NoBrush)
-        painter.drawRect(4, 4, w - 9, h - 9)
+        painter.drawRoundedRect(QRectF(4.5, 4.5, w - 9.0, h - 9.0), 16.0, 16.0)
+        # Faint inner glow line
+        painter.setPen(QPen(QColor(61, 224, 255, 28), 1.0))
+        painter.drawRoundedRect(QRectF(7.5, 7.5, w - 15.0, h - 15.0), 13.0, 13.0)
 
         painter.end()
 
@@ -770,47 +778,76 @@ class HoloPanel(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         w, h = self.width(), self.height()
+        rad = 14.0
+        outer = QRectF(0.5, 0.5, w - 1.0, h - 1.0)
+        inner = QRectF(3.5, 3.5, w - 7.0, h - 7.0)
 
-        # Multi-stop inset fill
+        # Multi-stop inset fill (rounded)
         fill = QLinearGradient(0, 0, 0, h)
         fill.setColorAt(0.0, QColor(10, 16, 26))
         fill.setColorAt(0.35, QColor(5, 8, 14))
         fill.setColorAt(1.0, QColor(4, 7, 12))
-        painter.fillRect(0, 0, w, h, fill)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(fill)
+        painter.drawRoundedRect(outer, rad, rad)
 
-        # Soft inner glow along top edge
-        top_glow = QLinearGradient(0, 0, 0, 18)
-        top_glow.setColorAt(0.0, QColor(61, 224, 255, 22))
-        top_glow.setColorAt(1.0, QColor(61, 224, 255, 0))
-        painter.fillRect(1, 1, w - 2, 18, top_glow)
-
-        # Outer border
-        painter.setPen(QPen(QColor(C_BORDER), 1.0))
+        # Soft cyan rim glow
+        glow_pen = QPen(QColor(61, 224, 255, 28))
+        glow_pen.setWidthF(2.0)
+        painter.setPen(glow_pen)
         painter.setBrush(Qt.BrushStyle.NoBrush)
-        painter.drawRect(0, 0, w - 1, h - 1)
+        painter.drawRoundedRect(outer.adjusted(1, 1, -1, -1), rad - 1, rad - 1)
 
-        # Inner double-line frame
+        # Soft inner glow along top edge (clipped to rounded shape)
+        painter.save()
+        painter.setClipRect(outer.toRect())
+        top_glow = QLinearGradient(0, 0, 0, 22)
+        top_glow.setColorAt(0.0, QColor(61, 224, 255, 28))
+        top_glow.setColorAt(1.0, QColor(61, 224, 255, 0))
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(top_glow)
+        painter.drawRoundedRect(outer.adjusted(1, 1, -1, -1), rad - 1, rad - 1)
+        painter.restore()
+
+        # Outer border — subtler
+        painter.setPen(QPen(QColor(46, 85, 120, 160), 1.0))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawRoundedRect(outer, rad, rad)
+
+        # Inner frame — soft, not a hard second box
         painter.setPen(QPen(QColor(C_BORDER_BRIGHT), 1.0))
-        painter.drawRect(3, 3, w - 7, h - 7)
+        painter.drawRoundedRect(inner, rad - 3, rad - 3)
 
-        # Corner brackets (double L + rivet)
-        tick = QColor(61, 224, 255, 190)
-        _draw_double_bracket(painter, 0, 0, 14, h_dir=1, v_dir=1, color=tick, thick=1.4, gap=2)
+        # Corner brackets (inset so they sit on the rounded chrome)
+        tick = QColor(61, 224, 255, 160)
+        inset = 6
+        arm = 12
         _draw_double_bracket(
-            painter, w - 1, 0, 14, h_dir=-1, v_dir=1, color=tick, thick=1.4, gap=2
+            painter, inset, inset, arm, h_dir=1, v_dir=1, color=tick, thick=1.3, gap=2
         )
         _draw_double_bracket(
-            painter, 0, h - 1, 14, h_dir=1, v_dir=-1, color=tick, thick=1.4, gap=2
+            painter, w - 1 - inset, inset, arm, h_dir=-1, v_dir=1, color=tick, thick=1.3, gap=2
         )
         _draw_double_bracket(
-            painter, w - 1, h - 1, 14, h_dir=-1, v_dir=-1, color=tick, thick=1.4, gap=2
+            painter, inset, h - 1 - inset, arm, h_dir=1, v_dir=-1, color=tick, thick=1.3, gap=2
+        )
+        _draw_double_bracket(
+            painter,
+            w - 1 - inset,
+            h - 1 - inset,
+            arm,
+            h_dir=-1,
+            v_dir=-1,
+            color=tick,
+            thick=1.3,
+            gap=2,
         )
 
         if self._scanlines and h > 4:
             painter.setPen(Qt.PenStyle.NoPen)
-            line = QColor(0, 0, 0, 22)
-            for y in range(0, h, 3):
-                painter.fillRect(4, y, w - 8, 1, line)
+            line = QColor(0, 0, 0, 18)
+            for y in range(8, h - 8, 3):
+                painter.fillRect(10, y, w - 20, 1, line)
 
         painter.end()
 

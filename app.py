@@ -58,6 +58,7 @@ except ImportError:
 try:
     from voice import speak_async, transcribe_audio
 except ImportError:
+    cancel_speak = None  # type: ignore[assignment]
     speak_async = None  # type: ignore[assignment]
     transcribe_audio = None  # type: ignore[assignment]
 
@@ -66,7 +67,8 @@ SAMPLE_RATE = 16000
 VOICE_HINT = (
     "The user may speak via microphone; reply in clear, conversational sentences. "
     "Avoid markdown, bullet lists, and code blocks unless they ask for code — "
-    "your answer may be read aloud."
+    "your answer may be read aloud. Be concise (2–4 short sentences) but always "
+    "finish every sentence — never trail off mid-thought."
 )
 
 # Crash/debug trail (also mirrored by run.command stdout/stderr redirect)
@@ -426,8 +428,10 @@ class JarvisWindow(QMainWindow):
         self._submit_user_message(text)
 
     def _submit_user_message(self, text: str) -> None:
-        # Invalidate any in-flight speak_finished from a previous turn
+        # Invalidate any in-flight speak_finished from a previous turn + stop audio
         self._speak_gen += 1
+        if cancel_speak is not None:
+            cancel_speak()
         self._model = self._model_entry.text().strip() or self._model
         self._append_chat("You", text)
         self._busy = True
@@ -580,6 +584,8 @@ class JarvisWindow(QMainWindow):
 
     def closeEvent(self, event) -> None:  # noqa: N802
         self._speak_gen += 1  # ignore late TTS callbacks
+        if cancel_speak is not None:
+            cancel_speak()
         self._client.close()
         super().closeEvent(event)
 
