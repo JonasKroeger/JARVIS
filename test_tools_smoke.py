@@ -86,6 +86,14 @@ class ToolSmokeTests(unittest.TestCase):
             "list_running_apps",
             "read_file",
             "web_search",
+            "calendar_events",
+            "volume_control",
+            "start_timer",
+            "list_timers",
+            "fetch_url",
+            "stock_quote",
+            "dark_mode",
+            "daily_briefing",
         ):
             self.assertIn(expected, names)
 
@@ -266,6 +274,187 @@ class ToolSmokeTests(unittest.TestCase):
     def test_notify_darwin_live(self) -> None:
         data = json.loads(jarvis.tool_notify({"title": "JARVIS test", "message": "smoke"}))
         self.assertTrue(data.get("ok"), data)
+
+    # --- premium wave: validation / Linux-safe ---
+
+    def test_fetch_url_rejects_file_scheme(self) -> None:
+        data = json.loads(jarvis.tool_fetch_url({"url": "file:///etc/passwd"}))
+        self.assertFalse(data.get("ok", True))
+        self.assertIn("http", data["error"].lower())
+
+    def test_fetch_url_rejects_empty(self) -> None:
+        data = json.loads(jarvis.tool_fetch_url({"url": ""}))
+        self.assertFalse(data.get("ok", True))
+
+    def test_fetch_url_parse_html(self) -> None:
+        html = (
+            "<html><head><title>Hello World</title>"
+            "<script>evil()</script><style>.x{}</style></head>"
+            "<body><p>Visible text here</p></body></html>"
+        )
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status = MagicMock()
+        mock_resp.text = html
+        mock_client = MagicMock()
+        mock_client.__enter__.return_value = mock_client
+        mock_client.get.return_value = mock_resp
+        with patch("jarvis.httpx.Client", return_value=mock_client):
+            data = json.loads(jarvis.tool_fetch_url({"url": "https://example.com", "max_chars": 100}))
+        self.assertTrue(data["ok"])
+        self.assertEqual(data["title"], "Hello World")
+        self.assertIn("Visible text here", data["text"])
+        self.assertNotIn("evil", data["text"])
+
+    def test_volume_control_bad_action(self) -> None:
+        data = json.loads(jarvis.tool_volume_control({"action": "blast"}))
+        self.assertFalse(data.get("ok", True))
+        self.assertIn("action must be", data["error"])
+
+    def test_volume_control_set_requires_level(self) -> None:
+        data = json.loads(jarvis.tool_volume_control({"action": "set"}))
+        self.assertFalse(data.get("ok", True))
+        self.assertIn("level", data["error"])
+
+    def test_volume_level_clamp(self) -> None:
+        data = json.loads(jarvis.tool_volume_control({"action": "set", "level": 150}))
+        self.assertEqual(data.get("level"), 100)
+        data2 = json.loads(jarvis.tool_volume_control({"action": "set", "level": -5}))
+        self.assertEqual(data2.get("level"), 0)
+
+    @unittest.skipUnless(platform.system() != "Darwin", "non-Darwin path")
+    def test_volume_control_non_darwin(self) -> None:
+        data = json.loads(jarvis.tool_volume_control({"action": "get"}))
+        self.assertFalse(data.get("ok", True))
+        self.assertIn("macOS", data["error"])
+
+    def test_start_timer_requires_duration(self) -> None:
+        data = json.loads(jarvis.tool_start_timer({}))
+        self.assertFalse(data.get("ok", True))
+        self.assertIn("seconds or minutes", data["error"])
+
+    def test_start_timer_rejects_negative(self) -> None:
+        data = json.loads(jarvis.tool_start_timer({"seconds": -1}))
+        self.assertFalse(data.get("ok", True))
+
+    def test_start_timer_cap_24h(self) -> None:
+        data = json.loads(jarvis.tool_start_timer({"seconds": 86400 + 1}))
+        self.assertFalse(data.get("ok", True))
+        self.assertIn("24h", data["error"])
+
+    def test_start_timer_minutes(self) -> None:
+        data = json.loads(jarvis.tool_start_timer({"minutes": 0.01, "label": "smoke"}))
+        self.assertTrue(data.get("ok"), data)
+        self.assertEqual(data["seconds"], 1)  # rounds to at least 1
+        self.assertEqual(data["label"], "smoke")
+        self.assertIn("ends_at", data)
+        listed = json.loads(jarvis.tool_list_timers({}))
+        self.assertGreaterEqual(listed["count"], 1)
+
+    def test_calendar_days_clamped(self) -> None:
+        data = json.loads(jarvis.tool_calendar_events({"days": 99}))
+        # On Linux: error + empty events; days not always echoed on error path
+        if platform.system() != "Darwin":
+            self.assertIn("error", data)
+            self.assertEqual(data.get("events"), [])
+        else:
+            self.assertEqual(data.get("days"), 7)
+
+    @unittest.skipUnless(platform.system() != "Darwin", "non-Darwin path")
+    def test_calendar_events_non_darwin(self) -> None:
+        data = json.loads(jarvis.tool_calendar_events({"days": 1}))
+        self.assertIn("error", data)
+        self.assertEqual(data.get("events"), [])
+
+    @unittest.skipUnless(platform.system() != "Darwin", "non-Darwin path")
+    def test_dark_mode_non_darwin(self) -> None:
+        data = json.loads(jarvis.tool_dark_mode({"mode": "status"}))
+        self.assertFalse(data.get("ok", True))
+
+    def test_dark_mode_bad_mode(self) -> None:
+        data = json.loads(jarvis.tool_dark_mode({"mode": "sepia"}))
+        self.assertFalse(data.get("ok", True))
+
+    def test_stock_quote_requires_symbol(self) -> None:
+        data = json.loads(jarvis.tool_stock_quote({"symbol": ""}))
+        self.assertFalse(data.get("ok", True))
+
+    def test_stock_quote_invalid_symbol(self) -> None:
+        data = json.loads(jarvis.tool_stock_quote({"symbol": "AAPL;rm"}))
+        self.assertFalse(data.get("ok", True))
+
+    def test_stock_quote_parse(self) -> None:
+        fake = {
+            "chart": {
+                "result": [
+                    {
+                        "meta": {
+                            "symbol": "AAPL",
+                            "regularMarketPrice": 190.5,
+                            "currency": "USD",
+                            "chartPreviousClose": 188.0,
+                        }
+                    }
+                ],
+                "error": None,
+            }
+        }
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status = MagicMock()
+        mock_resp.json.return_value = fake
+        mock_client = MagicMock()
+        mock_client.__enter__.return_value = mock_client
+        mock_client.get.return_value = mock_resp
+        with patch("jarvis.httpx.Client", return_value=mock_client):
+            data = json.loads(jarvis.tool_stock_quote({"symbol": "aapl"}))
+        self.assertTrue(data["ok"])
+        self.assertEqual(data["symbol"], "AAPL")
+        self.assertEqual(data["price"], 190.5)
+        self.assertEqual(data["currency"], "USD")
+        self.assertAlmostEqual(data["change_pct"], round((190.5 - 188.0) / 188.0 * 100, 4))
+
+    def test_daily_briefing_skips_weather_when_empty_city(self) -> None:
+        with (
+            patch("jarvis.tool_get_current_time", return_value=json.dumps({"iso_local": "t"})),
+            patch("jarvis.tool_get_system_status", return_value=json.dumps({"os": "Linux"})),
+            patch(
+                "jarvis.tool_calendar_events",
+                return_value=json.dumps({"events": [], "days": 1}),
+            ),
+            patch("jarvis.tool_github_status", return_value=json.dumps({"error": "no gh"})),
+            patch("jarvis.tool_get_weather") as weather,
+        ):
+            data = json.loads(jarvis.tool_daily_briefing({"city": ""}))
+        weather.assert_not_called()
+        self.assertTrue(data.get("ok"))
+        self.assertTrue(data["weather"].get("skipped"))
+
+    def test_daily_briefing_default_city(self) -> None:
+        with (
+            patch("jarvis.tool_get_current_time", return_value=json.dumps({"iso_local": "t"})),
+            patch("jarvis.tool_get_system_status", return_value=json.dumps({"os": "Linux"})),
+            patch(
+                "jarvis.tool_calendar_events",
+                return_value=json.dumps({"events": [], "days": 1}),
+            ),
+            patch("jarvis.tool_github_status", return_value=json.dumps({"authored": []})),
+            patch(
+                "jarvis.tool_get_weather",
+                return_value=json.dumps({"temp_C": "5", "nearest_area": "Helsinki"}),
+            ) as weather,
+        ):
+            data = json.loads(jarvis.tool_daily_briefing({}))
+        weather.assert_called_once()
+        self.assertEqual(weather.call_args[0][0].get("location"), "Helsinki")
+        self.assertEqual(data["weather"]["temp_C"], "5")
+
+    def test_chitchat_hi_still_fast(self) -> None:
+        self.assertTrue(jarvis.is_chitchat("hi"))
+        self.assertTrue(jarvis.is_chitchat("thanks"))
+
+    def test_briefing_phrases_not_chitchat(self) -> None:
+        self.assertFalse(jarvis.is_chitchat("good morning"))
+        self.assertFalse(jarvis.is_chitchat("brief me"))
+        self.assertFalse(jarvis.is_chitchat("status report"))
 
 
 if __name__ == "__main__":

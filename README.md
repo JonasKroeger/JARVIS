@@ -63,6 +63,8 @@ Notes are stored under `~/.jarvis/notes/`.
 
 ## Tools
 
-See [TOOLS.md](TOOLS.md) for the full tool list (time, notes, browser, apps, clipboard, weather, GitHub, system status, notify, reminders, music, screenshot, running apps, read_file, web search).
+See [TOOLS.md](TOOLS.md) for the full tool list (time, notes, browser, apps, clipboard, weather, GitHub, system status, notify, reminders, music, screenshot, running apps, read_file, web search, plus premium: calendar, volume, timers, fetch_url, stocks, dark mode, and **daily_briefing**).
+
+Say *good morning*, *brief me*, or *status report* to get the Iron Man-style `daily_briefing` composite.
 
 JARVIS also auto-loads `ELEVENLABS_*` from `~/JARVIS/.env` or `~/.jarvis/.env` if those files exist.

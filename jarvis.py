@@ -13,9 +13,12 @@ import shutil
 import socket
 import subprocess
 import sys
+import threading
+import time
 import urllib.parse
 import webbrowser
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
 
@@ -30,16 +33,30 @@ REMINDER_TEXT_MAX = 2_000
 READ_FILE_DEFAULT_MAX = 50_000
 READ_FILE_HARD_MAX = 500_000
 RUNNING_APPS_CAP = 40
+CALENDAR_EVENTS_CAP = 25
+TIMER_MAX_SECONDS = 24 * 3600
+FETCH_URL_DEFAULT_MAX = 8000
+FETCH_URL_HARD_MAX = 100_000
 
 NOTES_DIR = Path.home() / ".jarvis" / "notes"
 
+# Active timers tracked by start_timer / list_timers (daemon threads).
+_ACTIVE_TIMERS: list[dict[str, Any]] = []
+_TIMERS_LOCK = threading.Lock()
+
 SYSTEM_PROMPT = """You are JARVIS, a calm, precise local assistant. Be brief unless asked for detail;
 dry wit is fine, never cruel. Call tools for real actions/data — never invent timestamps, notes,
-clipboard, weather, GitHub, system status, search results, file contents, or command output.
+clipboard, weather, GitHub, system status, search results, file contents, stock prices, calendar
+events, or command output.
 
 Tools: time, notes, open_url, open_app, clipboard, get_weather, github_status, get_system_status,
-notify, create_reminder, music_control, take_screenshot, list_running_apps, read_file, web_search.
-Greetings/chitchat → plain text, no tools. Only tool-call for actions or live data.
+notify, create_reminder, music_control, take_screenshot, list_running_apps, read_file, web_search,
+calendar_events, volume_control, start_timer, list_timers, fetch_url, stock_quote, dark_mode,
+daily_briefing.
+
+When the user says good morning / brief me / status report (or similar), call daily_briefing and
+narrate the structured result — do not invent the briefing. Pure hi/thanks chitchat → plain text,
+no tools. Only tool-call for actions or live data.
 
 Answer factual/historical questions neutrally. Refuse only requests for harm, crime, or illegal/
 exploitative material."""
@@ -302,6 +319,138 @@ TOOLS: list[dict[str, Any]] = [
                     "query": {"type": "string", "description": "Search query."}
                 },
                 "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "calendar_events",
+            "description": "Lists Calendar.app events for today / next N days (macOS). Returns title, start, end, location.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "days": {
+                        "type": "integer",
+                        "description": "Number of days including today (default 1, max 7).",
+                    }
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "volume_control",
+            "description": "macOS output volume: get, set (level 0-100), mute, or unmute.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "description": "One of: get, set, mute, unmute",
+                    },
+                    "level": {
+                        "type": "integer",
+                        "description": "Volume 0-100 when action is set.",
+                    },
+                },
+                "required": ["action"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "start_timer",
+            "description": "Starts a background timer; fires a macOS notification when done.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "seconds": {"type": "integer", "description": "Duration in seconds."},
+                    "minutes": {"type": "number", "description": "Duration in minutes (alternative to seconds)."},
+                    "label": {"type": "string", "description": "Optional timer label for the notification."},
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_timers",
+            "description": "Lists active (not yet fired) JARVIS timers.",
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "fetch_url",
+            "description": "Fetches an http(s) URL and returns page title plus readable text (truncated).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string", "description": "http:// or https:// URL only."},
+                    "max_chars": {
+                        "type": "integer",
+                        "description": "Max characters of extracted text (default 8000).",
+                    },
+                },
+                "required": ["url"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "stock_quote",
+            "description": "Live stock/ETF quote via Yahoo Finance chart API (no key). Returns price, currency, change %.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "symbol": {"type": "string", "description": "Ticker symbol, e.g. AAPL, NOK.HE"},
+                },
+                "required": ["symbol"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "dark_mode",
+            "description": "macOS appearance: turn dark mode on/off, toggle, or report status.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "mode": {
+                        "type": "string",
+                        "description": "One of: on, off, toggle, status",
+                    }
+                },
+                "required": ["mode"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "daily_briefing",
+            "description": (
+                "Iron Man-style morning briefing: time, system status, today's calendar, optional "
+                "weather, and GitHub status — one structured JSON to narrate. Use for good morning / "
+                "brief me / status report."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "city": {
+                        "type": "string",
+                        "description": "City for weather (default Helsinki). Empty string skips weather.",
+                    }
+                },
+                "required": [],
             },
         },
     },
@@ -1123,6 +1272,599 @@ def tool_web_search(args: dict[str, Any]) -> str:
     )
 
 
+
+def tool_calendar_events(args: dict[str, Any]) -> str:
+    days_raw = args.get("days", 1)
+    try:
+        days = int(days_raw)
+    except (TypeError, ValueError):
+        days = 1
+    if days < 1:
+        days = 1
+    if days > 7:
+        days = 7
+    if platform.system() != "Darwin":
+        return json.dumps(
+            {
+                "error": "calendar_events is macOS-only (Calendar.app / icalBuddy)",
+                "events": [],
+            }
+        )
+
+    events: list[dict[str, Any]] = []
+    # Prefer icalBuddy when available.
+    if shutil.which("icalBuddy"):
+        try:
+            end_label = "today" if days == 1 else f"today+{days - 1}"
+            code, out, err = _run_cmd(
+                [
+                    "icalBuddy",
+                    "-n",
+                    "-nc",
+                    "-nrd",
+                    "-iep",
+                    "title,datetime,location",
+                    "-ps",
+                    "| |",
+                    "-b",
+                    "",
+                    "-df",
+                    "%Y-%m-%d",
+                    "-tf",
+                    "%H:%M",
+                    "eventsFrom:today",
+                    f"to:{end_label}",
+                ],
+                timeout=30.0,
+            )
+            if code == 0 and out is not None:
+                for line in (out or "").splitlines():
+                    line = line.strip()
+                    if not line:
+                        continue
+                    parts = [p.strip() for p in line.split("|")]
+                    title = parts[0] if parts else ""
+                    start_s = parts[1] if len(parts) > 1 else ""
+                    end_s = ""
+                    location = ""
+                    if len(parts) >= 4:
+                        end_s = parts[2]
+                        location = parts[3]
+                    elif len(parts) == 3:
+                        # title | datetime | location  OR title | start | end
+                        if re.search(r"\d", parts[2]) and ":" in parts[2] and " " not in parts[2]:
+                            end_s = parts[2]
+                        else:
+                            location = parts[2]
+                    ev: dict[str, Any] = {"title": title, "start": start_s, "end": end_s}
+                    if location:
+                        ev["location"] = location
+                    events.append(ev)
+                    if len(events) >= CALENDAR_EVENTS_CAP:
+                        break
+                return json.dumps(
+                    {
+                        "events": events[:CALENDAR_EVENTS_CAP],
+                        "days": days,
+                        "count": len(events[:CALENDAR_EVENTS_CAP]),
+                        "capped": len(events) >= CALENDAR_EVENTS_CAP,
+                        "source": "icalBuddy",
+                    }
+                )
+        except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+            pass  # fall through to Calendar.app
+
+    # days is a validated int — safe to interpolate into AppleScript.
+    script = f"""set startDate to (current date)
+set hours of startDate to 0
+set minutes of startDate to 0
+set seconds of startDate to 0
+set endDate to startDate + ({days} * days)
+set output to ""
+tell application "Calendar"
+  repeat with cal in calendars
+    set evts to (every event of cal whose start date ≥ startDate and start date < endDate)
+    repeat with e in evts
+      set t to summary of e
+      set s to (start date of e) as string
+      set en to (end date of e) as string
+      set loc to ""
+      try
+        set loc to location of e
+        if loc is missing value then set loc to ""
+      end try
+      set output to output & t & "|||" & s & "|||" & en & "|||" & loc & linefeed
+    end repeat
+  end repeat
+end tell
+return output"""
+    try:
+        code, out, err = _osascript(script, timeout=45.0)
+    except FileNotFoundError:
+        return json.dumps({"error": "osascript not found", "events": []})
+    except subprocess.TimeoutExpired:
+        return json.dumps({"error": "calendar query timed out", "events": []})
+    except OSError as e:
+        return json.dumps({"error": str(e), "events": []})
+    if code != 0:
+        return json.dumps(
+            {
+                "error": err or out or "Calendar.app query failed",
+                "events": [],
+                "returncode": code,
+            }
+        )
+    for line in (out or "").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        parts = line.split("|||")
+        title = parts[0].strip() if parts else ""
+        start_s = parts[1].strip() if len(parts) > 1 else ""
+        end_s = parts[2].strip() if len(parts) > 2 else ""
+        location = parts[3].strip() if len(parts) > 3 else ""
+        ev = {"title": title, "start": start_s, "end": end_s}
+        if location:
+            ev["location"] = location
+        events.append(ev)
+        if len(events) >= CALENDAR_EVENTS_CAP:
+            break
+    capped = len(events) >= CALENDAR_EVENTS_CAP
+    return json.dumps(
+        {
+            "events": events[:CALENDAR_EVENTS_CAP],
+            "days": days,
+            "count": len(events[:CALENDAR_EVENTS_CAP]),
+            "capped": capped,
+            "source": "Calendar.app",
+        }
+    )
+
+
+def tool_volume_control(args: dict[str, Any]) -> str:
+    action = str(args.get("action", "")).strip().lower()
+    if action not in ("get", "set", "mute", "unmute"):
+        return json.dumps(
+            {
+                "ok": False,
+                "error": "action must be one of: get, set, mute, unmute",
+            }
+        )
+    level: int | None = None
+    if action == "set":
+        level_raw = args.get("level", None)
+        if level_raw is None:
+            return json.dumps({"ok": False, "error": "level (0-100) required when action is set"})
+        try:
+            level = int(level_raw)
+        except (TypeError, ValueError):
+            return json.dumps({"ok": False, "error": "level must be an integer 0-100"})
+        level = max(0, min(100, level))
+    if platform.system() != "Darwin":
+        # Still report clamped level on non-Darwin so callers/tests see validation.
+        if action == "set" and level is not None:
+            return json.dumps(
+                {
+                    "ok": False,
+                    "error": "volume_control is macOS-only (osascript)",
+                    "level": level,
+                }
+            )
+        return json.dumps({"ok": False, "error": "volume_control is macOS-only (osascript)"})
+
+    if action == "set":
+        assert level is not None
+        script = f"set volume output volume {level}"
+        try:
+            code, out, err = _osascript(script, timeout=10.0)
+        except FileNotFoundError:
+            return json.dumps({"ok": False, "error": "osascript not found"})
+        except subprocess.TimeoutExpired:
+            return json.dumps({"ok": False, "error": "osascript timed out"})
+        except OSError as e:
+            return json.dumps({"ok": False, "error": str(e)})
+        if code != 0:
+            return json.dumps(
+                {"ok": False, "error": err or out or "set volume failed", "returncode": code}
+            )
+        return json.dumps({"ok": True, "action": "set", "level": level})
+
+    if action == "mute":
+        script = "set volume with output muted"
+    elif action == "unmute":
+        script = "set volume without output muted"
+    else:
+        script = """set vs to get volume settings
+set vol to output volume of vs
+set muted to output muted of vs
+return (vol as string) & "|" & (muted as string)"""
+
+    try:
+        code, out, err = _osascript(script, timeout=10.0)
+    except FileNotFoundError:
+        return json.dumps({"ok": False, "error": "osascript not found"})
+    except subprocess.TimeoutExpired:
+        return json.dumps({"ok": False, "error": "osascript timed out"})
+    except OSError as e:
+        return json.dumps({"ok": False, "error": str(e)})
+    if code != 0:
+        return json.dumps(
+            {"ok": False, "error": err or out or "volume_control failed", "returncode": code}
+        )
+    if action == "get":
+        parts = (out or "").split("|")
+        level = None
+        muted = None
+        try:
+            level = int(parts[0].strip())
+        except (ValueError, IndexError):
+            pass
+        if len(parts) > 1:
+            muted = parts[1].strip().lower() in ("true", "yes", "1")
+        return json.dumps({"ok": True, "action": "get", "level": level, "muted": muted, "raw": out})
+    return json.dumps({"ok": True, "action": action})
+
+
+def _timer_fire(timer_id: int, seconds: int, label: str) -> None:
+    try:
+        time.sleep(seconds)
+    except Exception:  # noqa: BLE001
+        return
+    finally:
+        with _TIMERS_LOCK:
+            for i, t in enumerate(_ACTIVE_TIMERS):
+                if t.get("id") == timer_id:
+                    _ACTIVE_TIMERS.pop(i)
+                    break
+    note = f"Timer done: {label}" if label else "Timer done"
+    if platform.system() == "Darwin":
+        try:
+            et = _escape_applescript(_clip_str(note, NOTIFY_MESSAGE_MAX))
+            title = _escape_applescript("JARVIS Timer")
+            _osascript(f'display notification "{et}" with title "{title}"', timeout=10.0)
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def tool_start_timer(args: dict[str, Any]) -> str:
+    seconds_raw = args.get("seconds", None)
+    minutes_raw = args.get("minutes", None)
+    seconds: float | None = None
+    if seconds_raw is not None and str(seconds_raw).strip() != "":
+        try:
+            seconds = float(seconds_raw)
+        except (TypeError, ValueError):
+            return json.dumps({"ok": False, "error": "seconds must be a number"})
+    elif minutes_raw is not None and str(minutes_raw).strip() != "":
+        try:
+            seconds = float(minutes_raw) * 60.0
+        except (TypeError, ValueError):
+            return json.dumps({"ok": False, "error": "minutes must be a number"})
+    else:
+        return json.dumps({"ok": False, "error": "provide seconds or minutes"})
+    if seconds <= 0:
+        return json.dumps({"ok": False, "error": "duration must be positive"})
+    if seconds > TIMER_MAX_SECONDS:
+        return json.dumps(
+            {
+                "ok": False,
+                "error": f"duration capped at {TIMER_MAX_SECONDS}s (24h); got {int(seconds)}",
+            }
+        )
+    sec_int = int(round(seconds))
+    if sec_int < 1:
+        sec_int = 1
+    label = args.get("label", "")
+    if label is None:
+        label = ""
+    if not isinstance(label, str):
+        label = str(label)
+    label = _clip_str(label.strip(), 200)
+    ends_at = (datetime.now().astimezone() + timedelta(seconds=sec_int)).isoformat()
+    with _TIMERS_LOCK:
+        timer_id = max((t.get("id", 0) for t in _ACTIVE_TIMERS), default=0) + 1
+        entry = {
+            "id": timer_id,
+            "seconds": sec_int,
+            "label": label,
+            "ends_at": ends_at,
+            "started_at": datetime.now().astimezone().isoformat(),
+        }
+        _ACTIVE_TIMERS.append(entry)
+    thread = threading.Thread(
+        target=_timer_fire,
+        args=(timer_id, sec_int, label),
+        name=f"jarvis-timer-{timer_id}",
+        daemon=True,
+    )
+    thread.start()
+    return json.dumps(
+        {"ok": True, "seconds": sec_int, "label": label, "ends_at": ends_at, "id": timer_id}
+    )
+
+
+def tool_list_timers(_: dict[str, Any]) -> str:
+    now = datetime.now().astimezone()
+    active: list[dict[str, Any]] = []
+    with _TIMERS_LOCK:
+        for t in list(_ACTIVE_TIMERS):
+            item = dict(t)
+            try:
+                ends = datetime.fromisoformat(str(t.get("ends_at", "")))
+                remaining = max(0, int((ends - now).total_seconds()))
+                item["remaining_seconds"] = remaining
+            except (TypeError, ValueError):
+                item["remaining_seconds"] = None
+            active.append(item)
+    return json.dumps({"timers": active, "count": len(active)})
+
+
+class _ReadableTextExtractor(HTMLParser):
+    """Extract title + visible text; skip script/style/noscript."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self._skip_depth = 0
+        self._in_title = False
+        self.title_parts: list[str] = []
+        self.body_parts: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        t = tag.lower()
+        if t in ("script", "style", "noscript"):
+            self._skip_depth += 1
+        elif t == "title":
+            self._in_title = True
+
+    def handle_endtag(self, tag: str) -> None:
+        t = tag.lower()
+        if t in ("script", "style", "noscript"):
+            if self._skip_depth > 0:
+                self._skip_depth -= 1
+        elif t == "title":
+            self._in_title = False
+
+    def handle_data(self, data: str) -> None:
+        if self._skip_depth:
+            return
+        if self._in_title:
+            self.title_parts.append(data)
+        else:
+            self.body_parts.append(data)
+
+
+def tool_fetch_url(args: dict[str, Any]) -> str:
+    url = str(args.get("url", "")).strip()
+    if not (url.startswith("http://") or url.startswith("https://")):
+        return json.dumps({"ok": False, "error": "url must start with http:// or https://"})
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        return json.dumps({"ok": False, "error": "only http/https URLs allowed"})
+    max_chars = args.get("max_chars", FETCH_URL_DEFAULT_MAX)
+    try:
+        max_chars = int(max_chars)
+    except (TypeError, ValueError):
+        max_chars = FETCH_URL_DEFAULT_MAX
+    if max_chars < 1:
+        max_chars = FETCH_URL_DEFAULT_MAX
+    if max_chars > FETCH_URL_HARD_MAX:
+        max_chars = FETCH_URL_HARD_MAX
+    try:
+        with httpx.Client(timeout=25.0, follow_redirects=True) as client:
+            r = client.get(
+                url,
+                headers={
+                    "User-Agent": (
+                        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                    ),
+                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                },
+            )
+            r.raise_for_status()
+            raw = r.text
+    except httpx.HTTPError as e:
+        return json.dumps({"ok": False, "error": f"fetch failed: {e}", "url": url})
+
+    cleaned = re.sub(r"(?is)<script[^>]*>.*?</script>", " ", raw)
+    cleaned = re.sub(r"(?is)<style[^>]*>.*?</style>", " ", cleaned)
+    cleaned = re.sub(r"(?is)<noscript[^>]*>.*?</noscript>", " ", cleaned)
+    extractor = _ReadableTextExtractor()
+    try:
+        extractor.feed(cleaned)
+        extractor.close()
+    except Exception:  # noqa: BLE001
+        pass
+    title = re.sub(r"\s+", " ", "".join(extractor.title_parts)).strip()
+    if not title:
+        m = re.search(r"(?is)<title[^>]*>(.*?)</title>", raw)
+        if m:
+            title = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", "", m.group(1))).strip()
+    text_body = re.sub(r"\s+", " ", "".join(extractor.body_parts)).strip()
+    if not text_body:
+        text_body = re.sub(r"(?is)<[^>]+>", " ", cleaned)
+        text_body = re.sub(r"\s+", " ", text_body).strip()
+    truncated = len(text_body) > max_chars
+    if truncated:
+        text_body = text_body[:max_chars]
+    return json.dumps(
+        {
+            "ok": True,
+            "url": url,
+            "title": title,
+            "text": text_body,
+            "truncated": truncated,
+            "chars": len(text_body),
+        }
+    )
+
+
+def tool_stock_quote(args: dict[str, Any]) -> str:
+    symbol = str(args.get("symbol", "")).strip().upper()
+    if not symbol:
+        return json.dumps({"ok": False, "error": "symbol is required"})
+    if not re.fullmatch(r"[A-Z0-9.\-]{1,20}", symbol):
+        return json.dumps({"ok": False, "error": "invalid symbol"})
+    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{urllib.parse.quote(symbol)}"
+    params = {"interval": "1d", "range": "1d"}
+    try:
+        with httpx.Client(timeout=20.0, follow_redirects=True) as client:
+            r = client.get(
+                url,
+                params=params,
+                headers={
+                    "User-Agent": (
+                        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                    ),
+                    "Accept": "application/json",
+                },
+            )
+            r.raise_for_status()
+            data = r.json()
+    except httpx.HTTPError as e:
+        return json.dumps({"ok": False, "error": f"quote request failed: {e}", "symbol": symbol})
+    except (json.JSONDecodeError, ValueError) as e:
+        return json.dumps({"ok": False, "error": f"invalid quote response: {e}", "symbol": symbol})
+
+    try:
+        chart = data.get("chart") or {}
+        if chart.get("error"):
+            return json.dumps({"ok": False, "error": str(chart["error"]), "symbol": symbol})
+        results = chart.get("result") or []
+        if not results or not isinstance(results[0], dict):
+            return json.dumps({"ok": False, "error": "no quote data for symbol", "symbol": symbol})
+        meta = results[0].get("meta") or {}
+        price = meta.get("regularMarketPrice")
+        if price is None:
+            return json.dumps({"ok": False, "error": "price unavailable", "symbol": symbol})
+        currency = meta.get("currency") or ""
+        prev = meta.get("chartPreviousClose")
+        if prev is None:
+            prev = meta.get("previousClose")
+        change_pct = None
+        if prev is not None:
+            try:
+                prev_f = float(prev)
+                price_f = float(price)
+                if prev_f != 0:
+                    change_pct = round((price_f - prev_f) / prev_f * 100.0, 4)
+            except (TypeError, ValueError):
+                change_pct = None
+        return json.dumps(
+            {
+                "ok": True,
+                "symbol": meta.get("symbol") or symbol,
+                "price": price,
+                "currency": currency,
+                "change_pct": change_pct,
+                "previous_close": prev,
+            }
+        )
+    except (TypeError, KeyError, IndexError) as e:
+        return json.dumps({"ok": False, "error": f"could not parse quote: {e}", "symbol": symbol})
+
+
+def tool_dark_mode(args: dict[str, Any]) -> str:
+    mode = str(args.get("mode", "")).strip().lower()
+    if mode not in ("on", "off", "toggle", "status"):
+        return json.dumps({"ok": False, "error": "mode must be one of: on, off, toggle, status"})
+    if platform.system() != "Darwin":
+        return json.dumps({"ok": False, "error": "dark_mode is macOS-only (System Events)"})
+    if mode == "status":
+        script = """tell application "System Events"
+  tell appearance preferences
+    return dark mode as string
+  end tell
+end tell"""
+    elif mode == "on":
+        script = """tell application "System Events"
+  tell appearance preferences
+    set dark mode to true
+  end tell
+end tell"""
+    elif mode == "off":
+        script = """tell application "System Events"
+  tell appearance preferences
+    set dark mode to false
+  end tell
+end tell"""
+    else:
+        script = """tell application "System Events"
+  tell appearance preferences
+    set dark mode to not dark mode
+    return dark mode as string
+  end tell
+end tell"""
+    try:
+        code, out, err = _osascript(script, timeout=15.0)
+    except FileNotFoundError:
+        return json.dumps({"ok": False, "error": "osascript not found"})
+    except subprocess.TimeoutExpired:
+        return json.dumps({"ok": False, "error": "osascript timed out"})
+    except OSError as e:
+        return json.dumps({"ok": False, "error": str(e)})
+    if code != 0:
+        return json.dumps(
+            {"ok": False, "error": err or out or "dark_mode failed", "returncode": code}
+        )
+    dark = None
+    if out:
+        dark = out.strip().lower() in ("true", "yes", "1")
+    result: dict[str, Any] = {"ok": True, "mode": mode}
+    if dark is not None:
+        result["dark"] = dark
+    if mode in ("on", "off"):
+        result["dark"] = mode == "on"
+    return json.dumps(result)
+
+
+def tool_daily_briefing(args: dict[str, Any]) -> str:
+    """Orchestrate existing tools into one structured briefing JSON."""
+    # city: omitted → Helsinki; explicit empty → skip weather
+    if "city" not in args:
+        city: str | None = "Helsinki"
+    else:
+        raw_city = args.get("city")
+        if raw_city is None:
+            city = None
+        else:
+            city = str(raw_city).strip() or None
+
+    briefing: dict[str, Any] = {"ok": True}
+
+    try:
+        briefing["time"] = json.loads(tool_get_current_time({}))
+    except Exception as e:  # noqa: BLE001
+        briefing["time"] = {"error": str(e)}
+
+    try:
+        briefing["system"] = json.loads(tool_get_system_status({}))
+    except Exception as e:  # noqa: BLE001
+        briefing["system"] = {"error": str(e)}
+
+    try:
+        briefing["calendar"] = json.loads(tool_calendar_events({"days": 1}))
+    except Exception as e:  # noqa: BLE001
+        briefing["calendar"] = {"error": str(e), "events": []}
+
+    if city:
+        try:
+            briefing["weather"] = json.loads(tool_get_weather({"location": city}))
+        except Exception as e:  # noqa: BLE001
+            briefing["weather"] = {"error": str(e)}
+    else:
+        briefing["weather"] = {"skipped": True}
+
+    try:
+        briefing["github"] = json.loads(tool_github_status({}))
+    except Exception as e:  # noqa: BLE001
+        briefing["github"] = {"error": str(e)}
+
+    return json.dumps(briefing)
+
+
+
 TOOL_DISPATCH = {
     "get_current_time": tool_get_current_time,
     "list_notes": tool_list_notes,
@@ -1142,6 +1884,14 @@ TOOL_DISPATCH = {
     "list_running_apps": tool_list_running_apps,
     "read_file": tool_read_file,
     "web_search": tool_web_search,
+    "calendar_events": tool_calendar_events,
+    "volume_control": tool_volume_control,
+    "start_timer": tool_start_timer,
+    "list_timers": tool_list_timers,
+    "fetch_url": tool_fetch_url,
+    "stock_quote": tool_stock_quote,
+    "dark_mode": tool_dark_mode,
+    "daily_briefing": tool_daily_briefing,
 }
 
 
@@ -1211,17 +1961,29 @@ def ensure_model(client: httpx.Client, model: str) -> None:
 
 _CHITCHAT_RE = re.compile(
     r"^(?:hi|hello|hey|howdy|yo|sup|hiya|thanks|thank you|thx|cheers|"
-    r"good (?:morning|afternoon|evening|night)|how are you|how(?:'s| is) it going|"
-    r"what(?:'s| is) up|morning|evening|bye|goodbye|see you|"
+    r"good (?:afternoon|evening|night)|how are you|how(?:'s| is) it going|"
+    r"what(?:'s| is) up|evening|bye|goodbye|see you|"
     r"ok|okay|sure|cool|nice|great|awesome|got it)(?:[!.?\s].*)?$",
+    re.IGNORECASE,
+)
+
+# These should get tools so daily_briefing can run (not treated as pure chitchat).
+_BRIEFING_RE = re.compile(
+    r"^(?:good\s+morning|brief\s+me|status\s+report|morning\s+brief(?:ing)?|"
+    r"daily\s+brief(?:ing)?|give\s+me\s+(?:a\s+)?(?:brief|status|update))(?:[!.?\s].*)?$",
     re.IGNORECASE,
 )
 
 
 def is_chitchat(text: str) -> bool:
-    """Short greetings/thanks — skip tools for a faster Ollama round-trip."""
+    """Short greetings/thanks — skip tools for a faster Ollama round-trip.
+
+    Briefing phrases (good morning / brief me / status report) keep tools enabled.
+    """
     t = (text or "").strip()
     if not t or len(t) > 40:
+        return False
+    if _BRIEFING_RE.match(t):
         return False
     return bool(_CHITCHAT_RE.match(t))
 

@@ -22,6 +22,14 @@ All tools return JSON strings. The model must call tools rather than invent resu
 | `list_running_apps` | — | Visible app process names (capped ~40) |
 | `read_file` | `path`, optional `max_bytes` | Text under home only; utf-8 replace; truncated flag |
 | `web_search` | `query` | DuckDuckGo Instant Answer API (no key); abstract + up to 5 related |
+| `calendar_events` | optional `days` (1–7, default 1) | macOS Calendar.app / `icalBuddy`; title/start/end/location; capped ~25 |
+| `volume_control` | `action` get\|set\|mute\|unmute, optional `level` | macOS output volume; `level` clamped 0–100 |
+| `start_timer` | `seconds` **or** `minutes`, optional `label` | Background daemon thread; macOS notification on fire; max 24h |
+| `list_timers` | — | Active timers with remaining seconds |
+| `fetch_url` | `url`, optional `max_chars` (default 8000) | http(s) only; title + readable text (scripts stripped) |
+| `stock_quote` | `symbol` | Yahoo Finance chart API (no key); price, currency, change % |
+| `dark_mode` | `mode` on\|off\|toggle\|status | macOS System Events appearance preferences |
+| `daily_briefing` | optional `city` | Composite: time + system + calendar(today) + weather + github; default city Helsinki; empty city skips weather |
 
 ## Safety
 
@@ -29,6 +37,8 @@ All tools return JSON strings. The model must call tools rather than invent resu
 - AppleScript string interpolations are escaped (`\` and `"`).
 - `read_file` / `take_screenshot` paths must resolve under `Path.home()` (no `..` escape).
 - `notify` / `create_reminder` reject insanely long strings and truncate reasonably.
+- `fetch_url` rejects non-http(s) schemes (no `file://`).
+- Timers capped at 24 hours; volume level clamped to 0–100.
 
 ## Try them (with Ollama running)
 
@@ -42,13 +52,19 @@ python jarvis.py
 # You › system status
 # You › search for Finland capital
 # You › notify me title Hello message World
+# You › good morning          # → daily_briefing
+# You › brief me
+# You › stock quote AAPL
+# You › set a 5 minute timer for tea
 ```
 
 Or GUI: `python app.py`.
 
 ### Prerequisites for some tools
 
-- **open_app**, **notify**, **create_reminder**, **music_control**, **take_screenshot**, **list_running_apps**: macOS
+- **open_app**, **notify**, **create_reminder**, **music_control**, **take_screenshot**, **list_running_apps**, **calendar_events**, **volume_control**, **dark_mode**: macOS
+- **start_timer** notification: macOS (timer tracking works cross-platform)
 - **clipboard**: macOS (`pbpaste`/`pbcopy`) or Linux with `xclip`
-- **get_weather**, **web_search**: network access
+- **get_weather**, **web_search**, **fetch_url**, **stock_quote**: network access
 - **github_status**: [GitHub CLI](https://cli.github.com/) installed and `gh auth login`
+- **calendar_events**: optional [icalBuddy](https://hasseg.org/icalBuddy/) for cleaner output; else Calendar.app
