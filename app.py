@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-JARVIS desktop app — voice-first soft-glow orb HUD (PyQt6).
+JARVIS desktop app — voice-first luminous soft-glow orb HUD (PyQt6).
 
 Hold the orb (or Space) to talk; release to send. Press / for a ghost text
-field. Replies prefer TTS with a fading caption — quiet circle of light.
+field. Replies prefer TTS with a fading caption — present circle of light.
 
 Run from the JARVIS folder: python app.py
 """
