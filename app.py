@@ -65,7 +65,10 @@ VOICE_HINT = (
     "The user may speak via microphone; reply in clear, conversational sentences. "
     "Avoid markdown, bullet lists, and code blocks unless they ask for code — "
     "your answer may be read aloud. Be concise (2–4 short sentences) but always "
-    "finish every sentence — never trail off mid-thought."
+    "finish every sentence — never trail off mid-thought. "
+    "Never auto-open with canned lines like 'Hello, how can I assist you?' — "
+    "not at session start and never before a tool call. If they just greet you, "
+    "answer briefly and naturally. Mentions of Coder → ask_coder with no preamble."
 )
 
 _DEBUG_LOG = Path(__file__).resolve().parent / "jarvis-debug.log"

@@ -64,10 +64,16 @@ calendar, files, search, stocks, system status, or memories.
 Memory: a "## Long-term memory" note is injected each turn — answer personal facts from it directly
 (no recall unless searching). Call remember/forget/list_memories when asked to store or change facts.
 
+Greetings: Never auto-open with canned lines like "Hello, how can I assist you?", "How can I help
+you?", "At your service", or similar session openers — not at startup, not as a first reply, and
+never before calling a tool. If the user greets without a task, answer briefly and naturally
+(e.g. "Hey." / "Evening.") — no help-desk opener. Never invent a greeting when routing to tools.
+
 Coder: Coder is Jonas's Grok Bot coding assistant (local reverse bridge). When the user mentions
-Coder or wants to ask/tell/talk to/message/ping Coder, you MUST call ask_coder with their request
-(or a clear paraphrase). Never invent Coder's reply. Never joke about cover fire, pairing, or
-handing off instead of calling the tool. If the bridge errors or times out, report the error plainly.
+Coder or wants to ask/tell/talk to/message/ping Coder, you MUST call ask_coder immediately with
+their request (or a clear paraphrase) — no spoken/text preamble, no greeting first. Never invent
+Coder's reply. Never joke about cover fire, pairing, or handing off instead of calling the tool.
+If the bridge errors or times out, report the error plainly.
 
 good morning / brief me / status report → call daily_briefing, then narrate. Chitchat, jokes, math,
 definitions, and personal facts from memory → plain text, no tools.
@@ -547,9 +553,10 @@ TOOLS: list[dict[str, Any]] = [
             "name": "ask_coder",
             "description": (
                 "Send a prompt to Coder (Grok Bot) via the local reverse bridge "
-                "mailbox on 127.0.0.1:8766 and return Coder's reply. Use when the "
-                "user wants help from Coder, coding assistance beyond local tools, "
-                "or explicitly asks to ask/tell Coder something."
+                "mailbox on 127.0.0.1:8766 and return Coder's reply. Call immediately "
+                "when the user mentions Coder (no greeting/preamble first). Use when "
+                "the user wants help from Coder, coding assistance beyond local tools, "
+                "or explicitly asks to ask/tell/talk to/message/ping Coder."
             ),
             "parameters": {
                 "type": "object",
@@ -2230,11 +2237,14 @@ def is_chitchat(text: str) -> bool:
     """Short greetings/thanks — skip tools for a faster Ollama round-trip.
 
     Briefing phrases (good morning / brief me / status report) keep tools enabled.
+    Any mention of Coder is never chitchat — those turns must reach ask_coder.
     """
     t = (text or "").strip()
     if not t or len(t) > 40:
         return False
     if _BRIEFING_RE.match(t):
+        return False
+    if mentions_coder(t):
         return False
     return bool(_CHITCHAT_RE.match(t))
 
@@ -2250,6 +2260,14 @@ def is_personal_memory_question(text: str) -> bool:
     if _BRIEFING_RE.match(t):
         return False
     return bool(_PERSONAL_MEMORY_RE.match(t))
+
+
+_CODER_MENTION_RE = re.compile(r"\bcoder\b", re.IGNORECASE)
+
+
+def mentions_coder(text: str) -> bool:
+    """True when the user names Coder (teammate bridge) — force ask_coder path."""
+    return bool(_CODER_MENTION_RE.search(text or ""))
 
 
 def looks_like_action_intent(text: str) -> bool:
@@ -2495,6 +2513,9 @@ def chat_round(
     content = msg.get("content") or ""
     tool_calls = msg.get("tool_calls")
 
+    # Drop spoken preambles that arrive alongside tool_calls (never greet-then-tool).
+    if tool_calls:
+        content = ""
     out_messages.append({"role": role, "content": content, "tool_calls": tool_calls})
 
     if not tool_calls:
@@ -2540,6 +2561,54 @@ def chat_round(
     return out_messages, None
 
 
+def _format_ask_coder_reply(tool_json: str) -> str:
+    """Relay Coder's reply (or bridge error) with no greeting/preamble."""
+    try:
+        data = json.loads(tool_json)
+    except json.JSONDecodeError:
+        return tool_json.strip() or "(Coder returned an empty reply.)"
+    if not isinstance(data, dict):
+        return str(data)
+    if data.get("ok"):
+        reply = str(data.get("reply") or "").strip()
+        return reply or "(Coder returned an empty reply.)"
+    err = str(data.get("error") or "unknown error").strip()
+    return f"Coder bridge error: {err}"
+
+
+def _force_ask_coder_turn(
+    messages: list[dict[str, Any]],
+    user_text: str,
+    *,
+    on_token: Any | None = None,
+) -> tuple[list[dict[str, Any]], str]:
+    """Call ask_coder immediately — no LLM preamble / canned greeting."""
+    state = list(messages)
+    args = {"message": user_text.strip()}
+    result = tool_ask_coder(args)
+    state.append(
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "type": "function",
+                    "function": {"name": "ask_coder", "arguments": args},
+                }
+            ],
+        }
+    )
+    state.append({"role": "tool", "name": "ask_coder", "content": result})
+    reply = _format_ask_coder_reply(result)
+    state.append({"role": "assistant", "content": reply, "tool_calls": None})
+    if on_token is not None and reply:
+        try:
+            on_token(reply)
+        except Exception:  # noqa: BLE001
+            pass
+    return state, reply
+
+
 def run_turn(
     client: httpx.Client,
     model: str,
@@ -2550,15 +2619,22 @@ def run_turn(
     """Run tool rounds until assistant returns text or cap hit.
 
     Tools are opt-in via needs_tools(); most chat uses the lean streamed no-tools path.
+    Any mention of Coder force-routes to ask_coder with no spoken preamble.
     ``on_token`` receives text deltas for early HUD display (no-tools stream + final narrate).
     """
     state = memory_store.inject_memory_messages(messages)
     last_text: str | None = None
+    last_user = ""
     use_tools = False
     for m in reversed(state):
         if m.get("role") == "user":
-            use_tools = needs_tools(str(m.get("content") or ""))
+            last_user = str(m.get("content") or "")
+            use_tools = needs_tools(last_user)
             break
+
+    # Coder mentions → ask_coder immediately (skip LLM greeting / tool-decision stall).
+    if mentions_coder(last_user):
+        return _force_ask_coder_turn(state, last_user, on_token=on_token)
 
     if not use_tools:
         state, text = chat_round(

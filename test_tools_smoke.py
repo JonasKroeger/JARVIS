@@ -538,6 +538,43 @@ class ToolSmokeTests(unittest.TestCase):
         self.assertTrue(jarvis.needs_tools("tell coder to fix the bug"))
         self.assertTrue(jarvis.needs_tools("message coder please"))
         self.assertTrue(jarvis.needs_tools("ping coder"))
+        self.assertTrue(jarvis.mentions_coder("hello coder"))
+        self.assertTrue(jarvis.mentions_coder("ask Coder to ship it"))
+        self.assertFalse(jarvis.mentions_coder("encoder settings"))
+        self.assertFalse(jarvis.is_chitchat("hello coder"))
+        self.assertFalse(jarvis.is_chitchat("hey coder fix this"))
+
+    def test_format_ask_coder_reply_no_preamble(self) -> None:
+        ok = jarvis._format_ask_coder_reply(
+            json.dumps({"ok": True, "reply": "patched the bridge"})
+        )
+        self.assertEqual(ok, "patched the bridge")
+        self.assertNotIn("assist", ok.lower())
+        err = jarvis._format_ask_coder_reply(
+            json.dumps({"ok": False, "error": "timeout"})
+        )
+        self.assertIn("Coder bridge error", err)
+        self.assertIn("timeout", err)
+
+    def test_force_ask_coder_turn_skips_llm_preamble(self) -> None:
+        import unittest.mock as mock
+
+        fake = json.dumps({"ok": True, "reply": "shipped", "id": "x"})
+        msgs = [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "tell coder to ship it"},
+        ]
+        with mock.patch.object(jarvis, "tool_ask_coder", return_value=fake) as ask:
+            out, reply = jarvis._force_ask_coder_turn(msgs, "tell coder to ship it")
+        ask.assert_called_once_with({"message": "tell coder to ship it"})
+        self.assertEqual(reply, "shipped")
+        self.assertNotIn("hello", reply.lower())
+        self.assertNotIn("assist", reply.lower())
+        # History: assistant tool_call → tool → assistant relay (no greeting content)
+        roles = [m.get("role") for m in out[-3:]]
+        self.assertEqual(roles, ["assistant", "tool", "assistant"])
+        self.assertEqual((out[-3].get("content") or ""), "")
+        self.assertTrue(out[-3].get("tool_calls"))
 
     def test_direct_tool_reply_weather(self) -> None:
         raw = json.dumps({
