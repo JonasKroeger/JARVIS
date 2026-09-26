@@ -11,7 +11,7 @@ Contract (mirrors forward bridge):
            → {"reply": "..."}
 
 Bind: 127.0.0.1 only. Port: CODER_BRIDGE_PORT (default 8766).
-Timeout waiting for outbox: CODER_BRIDGE_TIMEOUT (default 120s).
+Timeout waiting for outbox: CODER_BRIDGE_TIMEOUT (default 25s).
 Auth: if CODER_BRIDGE_API_KEY is set, require Authorization: Bearer <key>.
 
 Mailbox layout (under ~/JARVIS/coder_bridge/ by default, or next to this file):
@@ -37,7 +37,7 @@ from typing import Any, Callable
 from urllib.parse import urlparse
 
 DEFAULT_PORT = 8766
-DEFAULT_TIMEOUT = 120.0
+DEFAULT_TIMEOUT = 25.0
 HOST = "127.0.0.1"
 
 _LogFn = Callable[[str, BaseException | None], None]
@@ -150,7 +150,10 @@ def wait_for_outbox(req_id: str, timeout: float) -> dict[str, Any]:
                 return data
             # Malformed — keep waiting until timeout (worker may rewrite)
         time.sleep(0.05)
-    raise TimeoutError(f"no reply within {timeout:.0f}s (id={req_id})")
+    raise TimeoutError(
+        f"Coder bridge: no worker replied within {timeout:.0f}s "
+        f"(id={req_id}). Start: python coder_bridge_worker.py --echo"
+    )
 
 
 def handle_chat(
@@ -216,7 +219,32 @@ def make_handler(*, log: _LogFn | None = None) -> type[BaseHTTPRequestHandler]:
         def do_GET(self) -> None:  # noqa: N802
             path = urlparse(self.path).path.rstrip("/") or "/"
             if path == "/health":
-                self._send_json(200, {"ok": True, "role": "coder-mailbox"})
+                ensure_dirs()
+                pending = [
+                    f.name
+                    for f in _inbox_dir().glob("*.json")
+                    if f.is_file() and f.name != ".gitkeep"
+                ]
+                hb = _root_dir() / "worker.heartbeat"
+                worker_age = None
+                worker_alive = False
+                if hb.is_file():
+                    try:
+                        worker_age = round(time.time() - hb.stat().st_mtime, 2)
+                        worker_alive = worker_age <= 5.0
+                    except OSError:
+                        pass
+                self._send_json(
+                    200,
+                    {
+                        "ok": True,
+                        "role": "coder-mailbox",
+                        "pending": len(pending),
+                        "worker_alive": worker_alive,
+                        "worker_heartbeat_age_s": worker_age,
+                        "timeout_s": _env_timeout(),
+                    },
+                )
                 return
             self._send_json(404, {"error": "not found"})
 

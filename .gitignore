@@ -12,3 +12,6 @@ jarvis.pid
 piper/voices/
 piper/*.wav
 piper/**/*.onnx
+coder_bridge_worker.pid
+coder-bridge-worker.log
+coder_bridge/worker.heartbeat

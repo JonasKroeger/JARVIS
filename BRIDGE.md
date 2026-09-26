@@ -108,13 +108,13 @@ box). The reverse path is a **mailbox**:
 |---|---|
 | Host | `127.0.0.1` only |
 | Port | `8766` (`CODER_BRIDGE_PORT`) |
-| Timeout | `120` s default (`CODER_BRIDGE_TIMEOUT`) |
+| Timeout | `25` s default (`CODER_BRIDGE_TIMEOUT`) |
 | Auth | if `CODER_BRIDGE_API_KEY` set → Bearer / `X-Api-Key` |
 | Auto | `CODER_BRIDGE_AUTO=echo` answers in-process (smoke only) |
 
 ### Endpoints
 
-- `GET /health` → `{"ok": true, "role": "coder-mailbox"}`
+- `GET /health` → `{"ok": true, "role": "coder-mailbox", "pending": N, "worker_alive": bool, ...}`
 - `POST /chat` (also `POST /`) — same body shape as forward bridge
 
 Response:
@@ -128,13 +128,21 @@ Response:
 ```bash
 cd ~/JARVIS
 ./start_coder_bridge.sh
-# → daemon; log ~/JARVIS/coder-bridge.log ; pid ~/JARVIS/coder_bridge.pid
+# → mailbox daemon + echo worker (so ask_coder does not hang)
+# logs: coder-bridge.log / coder-bridge-worker.log
+# pids: coder_bridge.pid / coder_bridge_worker.pid
 
 curl -s http://127.0.0.1:8766/health
-# {"ok": true, "role": "coder-mailbox"}
+# {"ok": true, "role": "coder-mailbox", "worker_alive": true, ...}
 ```
 
 Does **not** require the Qt JARVIS app.
+
+**Important:** the default echo worker only acknowledges prompts (`[Coder] echo …`).
+It does **not** reach the live Grok Bot Coder chat. For real Coder replies, stop the
+echo worker and fulfill from Coder via `coder_bridge_worker.py --once --reply …`
+(or continuous stdin). Set `CODER_BRIDGE_ECHO_WORKER=0` before `./start_coder_bridge.sh`
+to skip the echo worker.
 
 ### JARVIS asks Coder
 
@@ -143,13 +151,13 @@ cd ~/JARVIS
 .venv/bin/python jarvis_ask_coder.py "What is Coder's role in one sentence?"
 ```
 
-Or from the orb / chat: tool `ask_coder` with `message` (POSTs to `CODER_URL`).
+Or from the orb / chat: any user message mentioning **Coder** force-routes to `ask_coder` (no LLM preamble). Tool also callable as `ask_coder` with `message` (POSTs to `CODER_URL`).
 
 Env:
 
 - `CODER_URL` — default `http://127.0.0.1:8766/chat`
 - `CODER_BRIDGE_API_KEY` — only if the mailbox has the same key set
-- `CODER_BRIDGE_TIMEOUT` — client HTTP timeout (default 180)
+- `CODER_BRIDGE_TIMEOUT` — client/server wait for worker (default 25)
 
 Offline smoke:
 

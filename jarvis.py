@@ -2012,6 +2012,17 @@ def tool_forget(args: dict[str, Any]) -> str:
 
 
 
+def _ask_coder_debug(msg: str) -> None:
+    """Best-effort append to jarvis-debug.log (same file as app.py)."""
+    try:
+        log_path = Path(__file__).resolve().parent / "jarvis-debug.log"
+        ts = time.strftime("%Y-%m-%d %H:%M:%S")
+        with log_path.open("a", encoding="utf-8") as f:
+            f.write(f"[{ts}] {msg}\n")
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def tool_ask_coder(args: dict[str, Any]) -> str:
     """POST message to local Coder mailbox (reverse bridge)."""
     message = str(args.get("message", "")).strip()
@@ -2024,25 +2035,53 @@ def tool_ask_coder(args: dict[str, Any]) -> str:
     )
     api_key = os.environ.get("CODER_BRIDGE_API_KEY", "").strip() or None
     try:
-        timeout = float(os.environ.get("CODER_BRIDGE_TIMEOUT", "90"))
+        timeout = float(os.environ.get("CODER_BRIDGE_TIMEOUT", "25"))
     except ValueError:
-        timeout = 90.0
+        timeout = 25.0
     timeout = max(5.0, min(timeout, 600.0))
     headers = {"Content-Type": "application/json"}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
     body = {"message": message, "context": {"source": "jarvis-tool"}}
+    _ask_coder_debug(f"ask_coder POST url={url} timeout={timeout:.0f}s msg={message[:120]!r}")
+    t0 = time.monotonic()
     try:
         with httpx.Client(timeout=timeout) as client:
             r = client.post(url, json=body, headers=headers)
+            if r.status_code == 504:
+                detail = ""
+                try:
+                    detail = str((r.json() or {}).get("error") or "")
+                except Exception:  # noqa: BLE001
+                    detail = (r.text or "")[:300]
+                err = detail or (
+                    f"Coder bridge: no worker replied within {timeout:.0f}s "
+                    "(start coder_bridge_worker.py --echo)"
+                )
+                _ask_coder_debug(f"ask_coder 504 after {time.monotonic()-t0:.1f}s: {err[:200]}")
+                return json.dumps({"ok": False, "error": err, "url": url, "status": 504})
             r.raise_for_status()
             data = r.json()
+    except httpx.TimeoutException:
+        err = (
+            f"Coder bridge: no worker replied within {timeout:.0f}s "
+            "(mailbox up but coder_bridge_worker not answering — "
+            "run: python coder_bridge_worker.py --echo)"
+        )
+        _ask_coder_debug(f"ask_coder timeout after {time.monotonic()-t0:.1f}s")
+        return json.dumps({"ok": False, "error": err, "url": url})
     except httpx.HTTPError as e:
+        _ask_coder_debug(f"ask_coder HTTPError after {time.monotonic()-t0:.1f}s: {e}")
         return json.dumps({"ok": False, "error": f"coder bridge failed: {e}", "url": url})
     except Exception as e:  # noqa: BLE001
+        _ask_coder_debug(f"ask_coder error after {time.monotonic()-t0:.1f}s: {type(e).__name__}: {e}")
         return json.dumps({"ok": False, "error": f"{type(e).__name__}: {e}", "url": url})
     if not isinstance(data, dict) or "reply" not in data:
         return json.dumps({"ok": False, "error": "unexpected response", "raw": str(data)[:200]})
+    _ask_coder_debug(
+        f"ask_coder ok after {time.monotonic()-t0:.1f}s id={data.get('id')} "
+        f"reply_len={len(str(data.get('reply') or ''))}"
+    )
     return json.dumps(
         {
             "ok": True,
@@ -2585,6 +2624,13 @@ def _force_ask_coder_turn(
     """Call ask_coder immediately — no LLM preamble / canned greeting."""
     state = list(messages)
     args = {"message": user_text.strip()}
+    _ask_coder_debug(f"force_ask_coder_turn msg={user_text.strip()[:120]!r}")
+    # Early HUD token so orb leaves THINKING while mailbox waits.
+    if on_token is not None:
+        try:
+            on_token("Contacting Coder…")
+        except Exception:  # noqa: BLE001
+            pass
     result = tool_ask_coder(args)
     state.append(
         {

@@ -239,6 +239,8 @@ class JarvisWindow(QMainWindow):
             display = "LISTENING"
         elif "synthesiz" in lower:
             display = "SYNTHESIZING"
+        elif "contacting" in lower:
+            display = "CONTACTING CODER"
         elif "thinking" in lower:
             display = "THINKING"
         elif "transcrib" in lower:
@@ -266,7 +268,14 @@ class JarvisWindow(QMainWindow):
             state = OrbVisualizer.LISTENING
         elif any(
             k in lower
-            for k in ("thinking", "synthesiz", "transcrib", "processing", "booting")
+            for k in (
+                "thinking",
+                "synthesiz",
+                "transcrib",
+                "processing",
+                "booting",
+                "contacting",
+            )
         ):
             state = OrbVisualizer.THINKING
         elif "speaking" in lower:
@@ -375,7 +384,10 @@ class JarvisWindow(QMainWindow):
         if not self._stream_active:
             self._stream_active = True
             self._stream_buf = ""
-            self._set_status("SYNTHESIZING")
+            if "contacting coder" in delta.lower():
+                self._set_status("CONTACTING CODER")
+            else:
+                self._set_status("SYNTHESIZING")
         self._stream_buf += delta
 
     def _on_ollama_ok(self, msgs: list, reply: str) -> None:

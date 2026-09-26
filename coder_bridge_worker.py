@@ -50,6 +50,16 @@ def ensure_dirs() -> None:
     _outbox_dir().mkdir(parents=True, exist_ok=True)
 
 
+def touch_heartbeat() -> None:
+    """Mark worker alive so /health can report worker_alive."""
+    ensure_dirs()
+    hb = _root_dir() / "worker.heartbeat"
+    try:
+        hb.write_text(f"{time.time()}\n", encoding="utf-8")
+    except OSError:
+        pass
+
+
 def list_pending() -> list[Path]:
     ensure_dirs()
     files = sorted(
@@ -144,6 +154,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     ensure_dirs()
+    touch_heartbeat()
     interval = _poll_interval()
 
     def handle_one(req: dict[str, Any]) -> None:
@@ -171,6 +182,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.once:
         deadline = time.monotonic() + max(0.0, args.wait)
         while True:
+            touch_heartbeat()
             req = claim_oldest()
             if req is not None:
                 handle_one(req)
@@ -194,6 +206,7 @@ def main(argv: list[str] | None = None) -> int:
         flush=True,
     )
     while True:
+        touch_heartbeat()
         req = claim_oldest()
         if req is None:
             time.sleep(interval)
@@ -212,5 +225,55 @@ def main(argv: list[str] | None = None) -> int:
             time.sleep(interval)
 
 
+def _daemonize(pidfile: Path, logfile: Path) -> None:
+    """Double-fork detach (Unix). Parent exits after writing pidfile."""
+    logfile.parent.mkdir(parents=True, exist_ok=True)
+    if os.fork() > 0:
+        raise SystemExit(0)
+    os.setsid()
+    if os.fork() > 0:
+        raise SystemExit(0)
+    sys.stdout.flush()
+    sys.stderr.flush()
+    with open(logfile, "a", encoding="utf-8") as logf:
+        os.dup2(logf.fileno(), sys.stdout.fileno())
+        os.dup2(logf.fileno(), sys.stderr.fileno())
+    with open(os.devnull, "r") as devnull:
+        os.dup2(devnull.fileno(), sys.stdin.fileno())
+    pidfile.write_text(str(os.getpid()) + "\n", encoding="utf-8")
+
+
+
 if __name__ == "__main__":
+    # Optional daemon wrapper so continuous --echo survives shell exit.
+    if "--daemon" in sys.argv:
+        argv = [a for a in sys.argv[1:] if a != "--daemon"]
+        pidfile = Path(
+            os.environ.get(
+                "CODER_BRIDGE_WORKER_PID",
+                str(Path(__file__).resolve().parent / "coder_bridge_worker.pid"),
+            )
+        )
+        logfile = Path(
+            os.environ.get(
+                "CODER_BRIDGE_WORKER_LOG",
+                str(Path(__file__).resolve().parent / "coder-bridge-worker.log"),
+            )
+        )
+        # Extract optional --pidfile/--logfile from argv
+        cleaned: list[str] = []
+        i = 0
+        while i < len(argv):
+            if argv[i] == "--pidfile" and i + 1 < len(argv):
+                pidfile = Path(argv[i + 1])
+                i += 2
+                continue
+            if argv[i] == "--logfile" and i + 1 < len(argv):
+                logfile = Path(argv[i + 1])
+                i += 2
+                continue
+            cleaned.append(argv[i])
+            i += 1
+        _daemonize(pidfile, logfile)
+        raise SystemExit(main(cleaned))
     raise SystemExit(main())
