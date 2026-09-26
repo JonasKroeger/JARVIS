@@ -15,3 +15,11 @@ piper/**/*.onnx
 coder_bridge_worker.pid
 coder-bridge-worker.log
 coder_bridge/worker.heartbeat
+
+# Live bridge
+coder_bridge_notify.pid
+coder-bridge-notify.log
+coder-bridge-launchd.log
+coder_bridge/PENDING.json
+coder_bridge/replies/*.json
+coder_bridge.notify.env

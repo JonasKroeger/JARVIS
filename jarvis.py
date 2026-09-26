@@ -2035,9 +2035,9 @@ def tool_ask_coder(args: dict[str, Any]) -> str:
     )
     api_key = os.environ.get("CODER_BRIDGE_API_KEY", "").strip() or None
     try:
-        timeout = float(os.environ.get("CODER_BRIDGE_TIMEOUT", "25"))
+        timeout = float(os.environ.get("CODER_BRIDGE_TIMEOUT", "90"))
     except ValueError:
-        timeout = 25.0
+        timeout = 90.0
     timeout = max(5.0, min(timeout, 600.0))
     headers = {"Content-Type": "application/json"}
     if api_key:
@@ -2056,7 +2056,7 @@ def tool_ask_coder(args: dict[str, Any]) -> str:
                     detail = (r.text or "")[:300]
                 err = detail or (
                     f"Coder bridge: no worker replied within {timeout:.0f}s "
-                    "(start coder_bridge_worker.py --echo)"
+                    "(fulfill: python fulfill_coder_reply.py --reply TEXT)"
                 )
                 _ask_coder_debug(f"ask_coder 504 after {time.monotonic()-t0:.1f}s: {err[:200]}")
                 return json.dumps({"ok": False, "error": err, "url": url, "status": 504})
@@ -2065,8 +2065,8 @@ def tool_ask_coder(args: dict[str, Any]) -> str:
     except httpx.TimeoutException:
         err = (
             f"Coder bridge: no worker replied within {timeout:.0f}s "
-            "(mailbox up but coder_bridge_worker not answering — "
-            "run: python coder_bridge_worker.py --echo)"
+            "(mailbox up but no live fulfill yet — "
+            "run: python fulfill_coder_reply.py --pending)"
         )
         _ask_coder_debug(f"ask_coder timeout after {time.monotonic()-t0:.1f}s")
         return json.dumps({"ok": False, "error": err, "url": url})

@@ -17,6 +17,9 @@ Modes:
 Env:
   CODER_BRIDGE_DIR   mailbox root (default: <repo>/coder_bridge)
   CODER_BRIDGE_POLL  poll interval seconds (default 0.25)
+
+LIVE MODE: do not run --echo. Prefer fulfill_coder_reply.py and
+coder_bridge_notify.py (started by start_coder_bridge.sh).
 """
 
 from __future__ import annotations

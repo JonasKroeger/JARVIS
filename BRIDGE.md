@@ -46,24 +46,12 @@ Response:
 {"reply": "Four."}
 ```
 
-`context` and `grok_draft` are optional. When present, `grok_draft` is injected
-as an extra system note so JARVIS can use it without treating it as its own
-prior turn.
-
 ### Verify (on the Mac)
 
 ```bash
 curl -s http://127.0.0.1:8765/health
-# {"ok": true}
-
-curl -s -X POST http://127.0.0.1:8765/chat \
-  -H 'Content-Type: application/json' \
-  -d '{"message":"what is 2+2","context":{"source":"curl"}}'
-
 python coder_jarvis_bridge.py "what is 2+2"
 ```
-
-Look for `bridge listening http://127.0.0.1:8765/chat` in `jarvis-debug.log`.
 
 ### How Coder uses it
 
@@ -74,48 +62,43 @@ Coder runs the client **on Jonas's Mac** via machine tools
 cd ~/JARVIS && .venv/bin/python coder_jarvis_bridge.py "your prompt here"
 ```
 
-Env (optional):
-
-- `JARVIS_URL` — default `http://127.0.0.1:8765/chat`
-- `JARVIS_API_KEY` — only if the running app has the same key set
-
-Offline smoke (no server):
-
-```bash
-python coder_jarvis_bridge.py --demo "hello"
-```
-
 ### Forward files
 
-- `bridge_server.py` — stdlib `ThreadingHTTPServer`; each request owns an httpx client and calls `run_turn`
+- `bridge_server.py` — stdlib `ThreadingHTTPServer`
 - `app.py` — starts the bridge in a daemon thread on launch
 - `coder_jarvis_bridge.py` — CLI client for Coder / Shell
 
 ---
 
-## Reverse: JARVIS → Coder (port 8766)
+## Reverse: JARVIS → Coder (port 8766) — LIVE MODE
 
-Coder does **not** run an HTTP server on the Mac by default (compute is a remote
-box). The reverse path is a **mailbox**:
+Coder does **not** expose a public HTTP server on the Mac. The reverse path is a
+**mailbox** plus a **live notifier** that wakes Coder (no echo ack).
 
-1. `coder_bridge_server.py` listens on `127.0.0.1:8766` **on the Mac**.
-2. Each `POST /chat` writes `coder_bridge/inbox/<id>.json` and blocks until
-   `coder_bridge/outbox/<id>.json` appears (or timeout / optional auto-echo).
-3. Coder fulfills requests by running `coder_bridge_worker.py` on the Mac
-   (Shell / machine tools), which writes the outbox reply.
+```
+User → JARVIS ask_coder → POST :8766/chat
+                         → inbox/<id>.json
+                         → PENDING.json + optional webhook POST
+Coder (Grok Bot) ← webhook routine / poll PENDING
+Coder → fulfill_coder_reply.py --reply "…" → outbox/<id>.json
+JARVIS ← {"reply":"…"} → TTS speaks clean text
+```
 
 | | |
 |---|---|
 | Host | `127.0.0.1` only |
 | Port | `8766` (`CODER_BRIDGE_PORT`) |
-| Timeout | `25` s default (`CODER_BRIDGE_TIMEOUT`) |
+| Mode | `CODER_BRIDGE_MODE=live` (**default**) — **no echo** |
+| Timeout | `90` s default in live (`CODER_BRIDGE_TIMEOUT`) |
 | Auth | if `CODER_BRIDGE_API_KEY` set → Bearer / `X-Api-Key` |
-| Auto | `CODER_BRIDGE_AUTO=echo` answers in-process (smoke only) |
+| Notify | `CODER_BRIDGE_NOTIFY_URL` → POST JSON when a request is queued |
+| Echo | **off** in live. Smoke only: `CODER_BRIDGE_MODE=echo` + `CODER_BRIDGE_ECHO_WORKER=1` |
 
 ### Endpoints
 
-- `GET /health` → `{"ok": true, "role": "coder-mailbox", "pending": N, "worker_alive": bool, ...}`
-- `POST /chat` (also `POST /`) — same body shape as forward bridge
+- `GET /health` → mode, pending count, worker_alive, notify_url_configured, timeout_s
+- `GET /pending` → full pending list (same as `coder_bridge/PENDING.json`)
+- `POST /chat` → blocks until outbox reply or timeout
 
 Response:
 
@@ -123,73 +106,113 @@ Response:
 {"reply": "...", "id": "<request-id>"}
 ```
 
-### Start the mailbox (Mac)
+### Start (Mac) — live, no echo
 
 ```bash
 cd ~/JARVIS
 ./start_coder_bridge.sh
-# → mailbox daemon + echo worker (so ask_coder does not hang)
-# logs: coder-bridge.log / coder-bridge-worker.log
-# pids: coder_bridge.pid / coder_bridge_worker.pid
+# → mailbox daemon + live notifier (echo worker skipped)
+# pids: coder_bridge.pid / coder_bridge_notify.pid
+# logs: coder-bridge.log / coder-bridge-notify.log
 
 curl -s http://127.0.0.1:8766/health
-# {"ok": true, "role": "coder-mailbox", "worker_alive": true, ...}
+# {"ok":true,"mode":"live","pending":0,"echo":false,"notify_url_configured":false,...}
 ```
 
-Does **not** require the Qt JARVIS app.
-
-**Important:** the default echo worker only acknowledges prompts (`[Coder] echo …`).
-It does **not** reach the live Grok Bot Coder chat. For real Coder replies, stop the
-echo worker and fulfill from Coder via `coder_bridge_worker.py --once --reply …`
-(or continuous stdin). Set `CODER_BRIDGE_ECHO_WORKER=0` before `./start_coder_bridge.sh`
-to skip the echo worker.
-
-### JARVIS asks Coder
+**Survive login/reboot** (LaunchAgent):
 
 ```bash
 cd ~/JARVIS
-.venv/bin/python jarvis_ask_coder.py "What is Coder's role in one sentence?"
+# After parent creates a Grok Bot webhook routine, export its URL:
+# export CODER_BRIDGE_NOTIFY_URL='https://…'
+./install_coder_bridge_launchagent.sh
+# installs ~/Library/LaunchAgents/com.jonas.jarvis.coder-bridge.plist
 ```
 
-Or from the orb / chat: any user message mentioning **Coder** force-routes to `ask_coder` (no LLM preamble). Tool also callable as `ask_coder` with `message` (POSTs to `CODER_URL`).
+### JARVIS asks Coder
 
-Env:
-
-- `CODER_URL` — default `http://127.0.0.1:8766/chat`
-- `CODER_BRIDGE_API_KEY` — only if the mailbox has the same key set
-- `CODER_BRIDGE_TIMEOUT` — client/server wait for worker (default 25)
-
-Offline smoke:
+Any user utterance mentioning **Coder** force-routes to `ask_coder` (no LLM preamble).
 
 ```bash
-python jarvis_ask_coder.py --demo "hello"
+.venv/bin/python jarvis_ask_coder.py "Tell Coder what is 2+2"
 ```
 
-### Coder answers (worker)
+Env: `CODER_URL`, `CODER_BRIDGE_API_KEY`, `CODER_BRIDGE_TIMEOUT` (live default 90).
 
-Coder keeps a small worker alive **on the Mac**, or answers one-shot for e2e:
+### How Coder is woken (parent must configure)
+
+1. **Webhook (preferred, low latency)**  
+   Parent creates a Grok Bot **webhook routine** that wakes this Coder chat.  
+   Put the URL in the Mac environment / LaunchAgent:
+
+   ```bash
+   export CODER_BRIDGE_NOTIFY_URL='https://YOUR_GROK_WEBHOOK_URL'
+   ./install_coder_bridge_launchagent.sh   # injects into plist + reloads
+   # or: restart with the env set
+   CODER_BRIDGE_NOTIFY_URL='…' ./start_coder_bridge.sh
+   ```
+
+   Payload POSTed on each new inbox item:
+
+   ```json
+   {
+     "event": "coder_bridge_pending",
+     "id": "<uuid>",
+     "message": "Tell Coder what is 2+2",
+     "context": {"source": "jarvis-tool"},
+     "fulfill_hint": "cd ~/JARVIS && .venv/bin/python fulfill_coder_reply.py --id <uuid> --reply \"YOUR ANSWER\""
+   }
+   ```
+
+2. **Aggressive poll (fallback)**  
+   Parent cron/routine (≥5 min) or a tight Shell poller:
+
+   ```bash
+   curl -s http://127.0.0.1:8766/pending
+   # or: cat ~/JARVIS/coder_bridge/PENDING.json
+   .venv/bin/python fulfill_coder_reply.py --pending
+   ```
+
+   Note: cron alone is too slow for voice; prefer webhook.
+
+### Coder answers (fulfill — required in live mode)
 
 ```bash
-# One-shot substantive reply (e2e / Coder turn)
-.venv/bin/python coder_bridge_worker.py --once --wait 30 \
-  --reply "I am Jonas's coding assistant, paired with JARVIS over the reverse localhost bridge."
+# List pending
+.venv/bin/python fulfill_coder_reply.py --pending
 
-# Smoke echo
-.venv/bin/python coder_bridge_worker.py --once --echo --wait 30
+# Answer oldest / specific id (spoken text only — no JSON/ids)
+.venv/bin/python fulfill_coder_reply.py --reply "Two plus two is four."
+.venv/bin/python fulfill_coder_reply.py --id <uuid> --reply "Two plus two is four."
 
-# Continuous: print each request as JSON line; read reply from stdin
-.venv/bin/python coder_bridge_worker.py
+# Or drop a file (notifier promotes to outbox)
+# ~/JARVIS/coder_bridge/replies/<id>.json
+# {"id":"<id>","reply":"Two plus two is four."}
 ```
 
-Mailbox paths (gitignored contents):
+Legacy worker still supports `--once --reply` / stdin, but **do not** run `--echo`
+in live mode.
+
+### Mailbox paths (gitignored contents)
 
 - `coder_bridge/inbox/<id>.json`
 - `coder_bridge/outbox/<id>.json`
+- `coder_bridge/replies/<id>.json` — optional drop
+- `coder_bridge/PENDING.json` — poll snapshot
 
 ### Reverse files
 
-- `coder_bridge_server.py` — mailbox `ThreadingHTTPServer` on `:8766`
-- `coder_bridge_worker.py` — Coder fulfills inbox → outbox
-- `jarvis_ask_coder.py` — CLI client (mirror of `coder_jarvis_bridge.py`)
-- `start_coder_bridge.sh` — background daemon + log
-- `jarvis.py` — optional tool `ask_coder`
+- `coder_bridge_server.py` — mailbox on `:8766` (notify on queue)
+- `coder_bridge_notify.py` — live watcher (PENDING + webhook + replies drop)
+- `fulfill_coder_reply.py` — Coder writes real replies
+- `coder_bridge_worker.py` — legacy echo/stdin worker (**not** started in live)
+- `jarvis_ask_coder.py` — CLI client
+- `start_coder_bridge.sh` — live mailbox + notifier
+- `launchd/com.jonas.jarvis.coder-bridge.plist` + `install_coder_bridge_launchagent.sh`
+- `jarvis.py` — tool `ask_coder` / `_force_ask_coder_turn`
+
+### Success criteria (live)
+
+- Spoken reply is **never** the echo ack `"Coder received your message."`
+- Parent has a path to see inbox (webhook and/or `/pending`) and fulfill within ~90s
+- JARVIS TTS speaks the real reply text only (no ids/JSON)

@@ -73,8 +73,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--timeout",
         type=float,
-        default=float(os.environ.get("CODER_BRIDGE_TIMEOUT", "25")),
-        help="HTTP timeout seconds (default 25 / CODER_BRIDGE_TIMEOUT)",
+        default=float(os.environ.get("CODER_BRIDGE_TIMEOUT", "90")),
+        help="HTTP timeout seconds (default 90 / CODER_BRIDGE_TIMEOUT)",
     )
     args = parser.parse_args(argv)
 

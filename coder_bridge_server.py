@@ -2,24 +2,32 @@
 """Coder reverse mailbox HTTP server (runs on Jonas's Mac).
 
 JARVIS (or any localhost client) POSTs prompts here; Coder fulfills them by
-writing replies into the outbox (via coder_bridge_worker.py) — Coder's compute
-is a remote box, so this listener must live on the Mac at 127.0.0.1.
+writing replies into the outbox (via fulfill_coder_reply.py / worker) — Coder's
+compute is a remote box, so this listener must live on the Mac at 127.0.0.1.
 
 Contract (mirrors forward bridge):
-  GET  /health → {"ok": true, "role": "coder-mailbox"}
-  POST /chat   JSON {"message": "...", "context": {...}}
-           → {"reply": "..."}
+  GET  /health  → {"ok": true, "role": "coder-mailbox", ...}
+  GET  /pending → {"count": N, "pending": [...]}
+  POST /chat    JSON {"message": "...", "context": {...}}
+            → {"reply": "...", "id": "..."}
 
 Bind: 127.0.0.1 only. Port: CODER_BRIDGE_PORT (default 8766).
-Timeout waiting for outbox: CODER_BRIDGE_TIMEOUT (default 25s).
+Timeout waiting for outbox: CODER_BRIDGE_TIMEOUT
+  (default 90s in live mode, 25s in echo/smoke).
 Auth: if CODER_BRIDGE_API_KEY is set, require Authorization: Bearer <key>.
 
-Mailbox layout (under ~/JARVIS/coder_bridge/ by default, or next to this file):
-  inbox/<id>.json   — pending requests
-  outbox/<id>.json  — replies written by the worker
+Mailbox layout (under ~/JARVIS/coder_bridge/ by default):
+  inbox/<id>.json    — pending requests
+  outbox/<id>.json   — replies written by Coder
+  replies/<id>.json  — optional drop folder (notifier promotes to outbox)
+  PENDING.json       — snapshot for aggressive polling
 
-Optional auto-handler: set CODER_BRIDGE_AUTO=echo to answer in-process with a short
-Coder-marked echo (smoke only; no worker needed).
+Live mode (CODER_BRIDGE_MODE=live, the default):
+  - No in-process echo
+  - On each inbox write: update PENDING.json + POST CODER_BRIDGE_NOTIFY_URL
+  - Coder fulfills via fulfill_coder_reply.py
+
+Smoke: CODER_BRIDGE_AUTO=echo or CODER_BRIDGE_MODE=echo answers in-process.
 """
 
 from __future__ import annotations
@@ -38,6 +46,7 @@ from urllib.parse import urlparse
 
 DEFAULT_PORT = 8766
 DEFAULT_TIMEOUT = 25.0
+DEFAULT_TIMEOUT_LIVE = 90.0
 HOST = "127.0.0.1"
 
 _LogFn = Callable[[str, BaseException | None], None]
@@ -51,7 +60,6 @@ def _root_dir() -> Path:
     override = os.environ.get("CODER_BRIDGE_DIR", "").strip()
     if override:
         return Path(override).expanduser().resolve()
-    # Prefer repo root next to this file (works for ~/JARVIS and /workspace/JARVIS).
     return Path(__file__).resolve().parent / "coder_bridge"
 
 
@@ -63,9 +71,112 @@ def _outbox_dir() -> Path:
     return _root_dir() / "outbox"
 
 
+def _replies_dir() -> Path:
+    return _root_dir() / "replies"
+
+
 def ensure_dirs() -> None:
     _inbox_dir().mkdir(parents=True, exist_ok=True)
     _outbox_dir().mkdir(parents=True, exist_ok=True)
+    _replies_dir().mkdir(parents=True, exist_ok=True)
+
+
+def _bridge_mode() -> str:
+    """live (default) | echo. live disables auto-echo and uses longer wait."""
+    raw = os.environ.get("CODER_BRIDGE_MODE", "live").strip().lower()
+    if raw in ("echo", "smoke"):
+        return "echo"
+    return "live"
+
+
+def _notify_url() -> str | None:
+    url = os.environ.get("CODER_BRIDGE_NOTIFY_URL", "").strip()
+    return url or None
+
+
+def list_pending_payloads() -> list[dict[str, Any]]:
+    ensure_dirs()
+    pending: list[dict[str, Any]] = []
+    for f in sorted(_inbox_dir().glob("*.json"), key=lambda p: p.stat().st_mtime):
+        if not f.is_file() or f.name.startswith("."):
+            continue
+        try:
+            data = json.loads(f.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            continue
+        if isinstance(data, dict) and data.get("id") and "message" in data:
+            pending.append(data)
+    return pending
+
+
+def refresh_pending_snapshot() -> dict[str, Any]:
+    """Write coder_bridge/PENDING.json for aggressive parent polling."""
+    pending = list_pending_payloads()
+    body = {
+        "updated_at": time.time(),
+        "count": len(pending),
+        "mode": _bridge_mode(),
+        "notify_url_configured": bool(_notify_url()),
+        "pending": [
+            {
+                "id": p.get("id"),
+                "message": p.get("message"),
+                "context": p.get("context") or {},
+                "created_at": p.get("created_at"),
+            }
+            for p in pending
+        ],
+    }
+    snap = _root_dir() / "PENDING.json"
+    tmp = snap.with_suffix(".tmp")
+    tmp.write_text(json.dumps(body, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    tmp.replace(snap)
+    return body
+
+
+def fire_notify(req: dict[str, Any], *, log: _LogFn | None = None) -> None:
+    """Best-effort POST to CODER_BRIDGE_NOTIFY_URL (non-blocking thread)."""
+    url = _notify_url()
+    if not url:
+        return
+    log_fn = log or _noop_log
+
+    def _post() -> None:
+        payload = {
+            "event": "coder_bridge_pending",
+            "id": req.get("id"),
+            "message": req.get("message"),
+            "context": req.get("context") or {},
+            "created_at": req.get("created_at"),
+            "mailbox": str(_root_dir()),
+            "fulfill_hint": (
+                f'cd ~/JARVIS && .venv/bin/python fulfill_coder_reply.py '
+                f'--id {req.get("id")} --reply "YOUR ANSWER"'
+            ),
+        }
+        body = json.dumps(payload).encode("utf-8")
+        try:
+            import urllib.request
+
+            http_req = urllib.request.Request(
+                url,
+                data=body,
+                method="POST",
+                headers={
+                    "Content-Type": "application/json",
+                    "User-Agent": "jarvis-coder-mailbox/1",
+                },
+            )
+            with urllib.request.urlopen(http_req, timeout=8) as resp:
+                _ = resp.read(128)
+            log_fn(f"coder-mailbox notify ok id={req.get('id')}", None)
+        except Exception as e:  # noqa: BLE001
+            log_fn(
+                f"coder-mailbox notify failed id={req.get('id')}: {type(e).__name__}: {e}",
+                e,
+            )
+
+    threading.Thread(target=_post, name="coder-notify", daemon=True).start()
 
 
 def _env_port() -> int:
@@ -78,11 +189,12 @@ def _env_port() -> int:
 
 
 def _env_timeout() -> float:
-    raw = os.environ.get("CODER_BRIDGE_TIMEOUT", str(DEFAULT_TIMEOUT)).strip()
+    default = DEFAULT_TIMEOUT_LIVE if _bridge_mode() == "live" else DEFAULT_TIMEOUT
+    raw = os.environ.get("CODER_BRIDGE_TIMEOUT", str(default)).strip()
     try:
         t = float(raw)
     except ValueError:
-        t = DEFAULT_TIMEOUT
+        t = default
     return max(1.0, min(t, 3600.0))
 
 
@@ -104,21 +216,31 @@ def _check_auth(handler: BaseHTTPRequestHandler) -> bool:
 
 
 def _auto_mode() -> str | None:
+    # Live mode never auto-echoes unless explicitly forced via CODER_BRIDGE_AUTO.
     mode = os.environ.get("CODER_BRIDGE_AUTO", "").strip().lower()
-    return mode or None
+    if mode:
+        return mode
+    if _bridge_mode() == "echo":
+        return "echo"
+    return None
 
 
 def _auto_reply(message: str, context: dict[str, Any] | None, req_id: str) -> str | None:
     """In-process handler for smoke tests. Returns reply text or None to wait for worker."""
     mode = _auto_mode()
     if mode == "echo":
-        # Spoken-friendly; never leak mailbox ids / source into TTS path.
         _ = (message, context, req_id)
         return "Coder received your message."
     return None
 
 
-def write_inbox(req_id: str, message: str, context: dict[str, Any] | None) -> Path:
+def write_inbox(
+    req_id: str,
+    message: str,
+    context: dict[str, Any] | None,
+    *,
+    log: _LogFn | None = None,
+) -> Path:
     ensure_dirs()
     path = _inbox_dir() / f"{req_id}.json"
     payload = {
@@ -130,6 +252,8 @@ def write_inbox(req_id: str, message: str, context: dict[str, Any] | None) -> Pa
     tmp = path.with_suffix(".tmp")
     tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     tmp.replace(path)
+    refresh_pending_snapshot()
+    fire_notify(payload, log=log)
     return path
 
 
@@ -146,11 +270,10 @@ def wait_for_outbox(req_id: str, timeout: float) -> dict[str, Any]:
                 continue
             if isinstance(data, dict) and "reply" in data:
                 return data
-            # Malformed — keep waiting until timeout (worker may rewrite)
         time.sleep(0.05)
     raise TimeoutError(
-        f"Coder bridge: no worker replied within {timeout:.0f}s "
-        f"(id={req_id}). Start: python coder_bridge_worker.py --echo"
+        f"Coder bridge: no reply within {timeout:.0f}s "
+        f"(id={req_id}). Fulfill: python fulfill_coder_reply.py --id {req_id} --reply TEXT"
     )
 
 
@@ -177,15 +300,18 @@ def handle_chat(
         log(f"coder-mailbox auto-reply id={req_id}", None)
         return {"reply": auto, "id": req_id}
 
-    write_inbox(req_id, message, context)
-    log(f"coder-mailbox queued id={req_id}", None)
+    write_inbox(req_id, message, context, log=log)
+    log(f"coder-mailbox queued id={req_id} mode={_bridge_mode()}", None)
     try:
         data = wait_for_outbox(req_id, timeout)
     finally:
-        # Best-effort cleanup of inbox entry once we've waited (reply or timeout).
         inbox_path = _inbox_dir() / f"{req_id}.json"
         try:
             inbox_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        try:
+            refresh_pending_snapshot()
         except OSError:
             pass
 
@@ -218,11 +344,7 @@ def make_handler(*, log: _LogFn | None = None) -> type[BaseHTTPRequestHandler]:
             path = urlparse(self.path).path.rstrip("/") or "/"
             if path == "/health":
                 ensure_dirs()
-                pending = [
-                    f.name
-                    for f in _inbox_dir().glob("*.json")
-                    if f.is_file() and f.name != ".gitkeep"
-                ]
+                pending = list_pending_payloads()
                 hb = _root_dir() / "worker.heartbeat"
                 worker_age = None
                 worker_alive = False
@@ -237,12 +359,19 @@ def make_handler(*, log: _LogFn | None = None) -> type[BaseHTTPRequestHandler]:
                     {
                         "ok": True,
                         "role": "coder-mailbox",
+                        "mode": _bridge_mode(),
                         "pending": len(pending),
                         "worker_alive": worker_alive,
                         "worker_heartbeat_age_s": worker_age,
                         "timeout_s": _env_timeout(),
+                        "notify_url_configured": bool(_notify_url()),
+                        "echo": False if _bridge_mode() == "live" else True,
                     },
                 )
+                return
+            if path == "/pending":
+                body = refresh_pending_snapshot()
+                self._send_json(200, body)
                 return
             self._send_json(404, {"error": "not found"})
 
@@ -292,6 +421,7 @@ def create_server(
     log: _LogFn | None = None,
 ) -> ThreadingHTTPServer:
     ensure_dirs()
+    refresh_pending_snapshot()
     port = _env_port() if port is None else port
     handler = make_handler(log=log)
     server = ThreadingHTTPServer((host, port), handler)
@@ -312,7 +442,11 @@ def start_mailbox_in_thread(*, log: _LogFn | None = None) -> threading.Thread | 
     def _run() -> None:
         try:
             server = create_server(port=port, log=log_fn)
-            log_fn(f"coder-mailbox listening http://{HOST}:{port}/chat", None)
+            log_fn(
+                f"coder-mailbox listening http://{HOST}:{port}/chat "
+                f"mode={_bridge_mode()} timeout={_env_timeout():.0f}s",
+                None,
+            )
             server.serve_forever()
         except OSError as e:
             log_fn(f"coder-mailbox failed to bind {HOST}:{port}: {e}", e)
@@ -330,11 +464,9 @@ def start_mailbox_in_thread(*, log: _LogFn | None = None) -> threading.Thread | 
 def _daemonize(pidfile: Path, logfile: Path) -> None:
     """Double-fork detach (Unix). Parent exits after writing pidfile."""
     logfile.parent.mkdir(parents=True, exist_ok=True)
-    # First fork
     if os.fork() > 0:
         raise SystemExit(0)
     os.setsid()
-    # Second fork
     if os.fork() > 0:
         raise SystemExit(0)
     sys.stdout.flush()
@@ -382,7 +514,11 @@ if __name__ == "__main__":
 
     srv = create_server(log=_print_log)
     port = srv.server_address[1]
-    print(f"coder-mailbox listening http://{HOST}:{port}/chat", flush=True)
+    print(
+        f"coder-mailbox listening http://{HOST}:{port}/chat "
+        f"mode={_bridge_mode()} timeout={_env_timeout():.0f}s",
+        flush=True,
+    )
     print(f"mailbox dir: {_root_dir()}", flush=True)
     try:
         srv.serve_forever()
