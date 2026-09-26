@@ -1,9 +1,11 @@
-"""macOS TTS (say) + local Faster-Whisper STT."""
+"""TTS (ElevenLabs primary, macOS `say` fallback) + local Faster-Whisper STT."""
 
 from __future__ import annotations
 
+import os
 import re
 import subprocess
+import sys
 import tempfile
 import threading
 import wave
@@ -16,9 +18,14 @@ import numpy as np
 _whisper_model = None
 _whisper_lock = threading.Lock()
 
+# ElevenLabs defaults — Daniel (authoritative British male). Override via env.
+DEFAULT_ELEVENLABS_VOICE_ID = "onwK4e9ZLuTAKqWW03F9"
+DEFAULT_ELEVENLABS_MODEL_ID = "eleven_turbo_v2_5"
+ELEVENLABS_TTS_URL = "https://api.elevenlabs.io/v1/text-to-speech/{voice_id}"
+
 
 def text_for_speech(text: str) -> str:
-    """Strip markdown-ish noise so `say` sounds natural."""
+    """Strip markdown-ish noise so TTS sounds natural."""
     t = text.strip()
     t = re.sub(r"```[\s\S]*?```", " ", t)
     t = re.sub(r"`([^`]+)`", r"\1", t)
@@ -29,22 +36,113 @@ def text_for_speech(text: str) -> str:
     return t.strip() or " "
 
 
+def _elevenlabs_api_key() -> str | None:
+    key = os.environ.get("ELEVENLABS_API_KEY", "").strip()
+    return key or None
+
+
+def _speak_via_say(safe: str) -> None:
+    if sys.platform != "darwin":
+        return
+    try:
+        subprocess.run(
+            ["/usr/bin/say", safe],
+            check=False,
+            capture_output=True,
+            timeout=600,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+
+
+def _play_audio_file(path: Path) -> None:
+    """Play a local audio file; prefer afplay on macOS."""
+    if sys.platform == "darwin" and Path("/usr/bin/afplay").exists():
+        subprocess.run(
+            ["/usr/bin/afplay", str(path)],
+            check=False,
+            capture_output=True,
+            timeout=600,
+        )
+        return
+    # Best-effort fallback: try ffplay / aplay if present
+    for cmd in (
+        ["ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet", str(path)],
+        ["aplay", str(path)],
+    ):
+        try:
+            subprocess.run(cmd, check=False, capture_output=True, timeout=600)
+            return
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+
+
+def _speak_via_elevenlabs(safe: str, api_key: str) -> bool:
+    """POST to ElevenLabs TTS and play the result. Returns True on success."""
+    import httpx
+
+    voice_id = (
+        os.environ.get("ELEVENLABS_VOICE_ID", "").strip()
+        or DEFAULT_ELEVENLABS_VOICE_ID
+    )
+    model_id = (
+        os.environ.get("ELEVENLABS_MODEL_ID", "").strip()
+        or DEFAULT_ELEVENLABS_MODEL_ID
+    )
+    url = ELEVENLABS_TTS_URL.format(voice_id=voice_id)
+    headers = {
+        "xi-api-key": api_key,
+        "Accept": "audio/mpeg",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "text": safe,
+        "model_id": model_id,
+        "voice_settings": {
+            "stability": 0.45,
+            "similarity_boost": 0.75,
+        },
+    }
+    tmp_path: Path | None = None
+    try:
+        with httpx.Client(timeout=60.0) as client:
+            resp = client.post(url, headers=headers, json=payload)
+            resp.raise_for_status()
+            audio = resp.content
+        if not audio:
+            return False
+        with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as tmp:
+            tmp_path = Path(tmp.name)
+            tmp.write(audio)
+        _play_audio_file(tmp_path)
+        return True
+    except Exception:  # noqa: BLE001 — any EL failure → caller falls back to say
+        return False
+    finally:
+        if tmp_path is not None:
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+
 def speak_async(text: str, on_done: Callable[[], None] | None = None) -> None:
-    """Speak in a background thread (non-blocking UI)."""
+    """Speak in a background thread (non-blocking UI).
+
+    Uses ElevenLabs when ELEVENLABS_API_KEY is set; otherwise (or on any
+    ElevenLabs failure) falls back to macOS `/usr/bin/say`.
+    """
 
     def run() -> None:
         safe = text_for_speech(text)
         if len(safe) > 32000:
             safe = safe[:32000] + "…"
-        try:
-            subprocess.run(
-                ["/usr/bin/say", safe],
-                check=False,
-                capture_output=True,
-                timeout=600,
-            )
-        except (OSError, subprocess.TimeoutExpired):
-            pass
+        api_key = _elevenlabs_api_key()
+        used_el = False
+        if api_key:
+            used_el = _speak_via_elevenlabs(safe, api_key)
+        if not used_el:
+            _speak_via_say(safe)
         if on_done:
             on_done()
 
