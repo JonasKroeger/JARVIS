@@ -2600,18 +2600,89 @@ def chat_round(
     return out_messages, None
 
 
+_CODER_ECHO_PREFIX_RE = re.compile(
+    r"^\s*"
+    r"(?:"
+    r"\[Coder\]\s*echo\s+id=[^:\n]*:\s*"
+    r"|\[Coder\s+echo\]\s*id=\S+(?:\s+source=\S+)?\s*(?:message=)?"
+    r"|Coder\s+echo\s+id=[^:\n]*:\s*"
+    r")",
+    re.IGNORECASE,
+)
+
+
+def _clean_coder_spoken_text(text: str) -> str:
+    """Strip mailbox/echo metadata so TTS/HUD get natural language only."""
+    s = (text or "").strip()
+    if not s:
+        return s
+    # Never speak raw JSON payloads.
+    if (s.startswith("{") and s.endswith("}")) or (s.startswith("[") and s.endswith("]")):
+        try:
+            parsed = json.loads(s)
+        except json.JSONDecodeError:
+            parsed = None
+        if isinstance(parsed, dict):
+            if "reply" in parsed:
+                s = str(parsed.get("reply") or "").strip()
+            elif "error" in parsed:
+                return f"Coder bridge error: {str(parsed.get('error') or 'unknown error').strip()}"
+            else:
+                return "Coder sent a reply I could not read aloud."
+        elif parsed is not None:
+            return "Coder sent a reply I could not read aloud."
+    # Drop leftover "[Coder] echo id=…:" / "[Coder echo] id=…" prefixes.
+    for _ in range(3):
+        nxt = _CODER_ECHO_PREFIX_RE.sub("", s, count=1).strip()
+        if nxt == s:
+            break
+        s = nxt
+        # If prefix left a Python-repr quoted message, unquote it.
+        if len(s) >= 2 and s[0] == s[-1] and s[0] in "'\"":
+            try:
+                s = ast_literal_eval_str(s)
+            except Exception:  # noqa: BLE001
+                s = s[1:-1]
+    # Strip bare "id=<uuid>" crumbs if any remain at start.
+    s = re.sub(
+        r"^id=[0-9a-fA-F-]{8,}\s*(?:source=\S+\s*)?:?\s*",
+        "",
+        s,
+    ).strip()
+    return s
+
+
+def ast_literal_eval_str(quoted: str) -> str:
+    """Safely unquote a single Python string literal."""
+    import ast
+
+    val = ast.literal_eval(quoted)
+    if not isinstance(val, str):
+        raise TypeError("not a string literal")
+    return val
+
+
 def _format_ask_coder_reply(tool_json: str) -> str:
-    """Relay Coder's reply (or bridge error) with no greeting/preamble."""
+    """Relay Coder's reply body only — never speak ids, raw JSON, or mailbox metadata."""
+    raw = (tool_json or "").strip()
+    if not raw:
+        return "(Coder returned an empty reply.)"
     try:
-        data = json.loads(tool_json)
+        data = json.loads(raw)
     except json.JSONDecodeError:
-        return tool_json.strip() or "(Coder returned an empty reply.)"
+        cleaned = _clean_coder_spoken_text(raw)
+        return cleaned or "(Coder returned an empty reply.)"
     if not isinstance(data, dict):
-        return str(data)
+        cleaned = _clean_coder_spoken_text(str(data))
+        return cleaned or "(Coder returned an empty reply.)"
     if data.get("ok"):
-        reply = str(data.get("reply") or "").strip()
+        reply = _clean_coder_spoken_text(str(data.get("reply") or ""))
         return reply or "(Coder returned an empty reply.)"
     err = str(data.get("error") or "unknown error").strip()
+    # Keep errors brief and speakable; drop url/status dumps.
+    err = re.sub(r"\s+", " ", err)
+    if len(err) > 160:
+        err = err[:157] + "…"
     return f"Coder bridge error: {err}"
 
 

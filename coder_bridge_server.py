@@ -18,7 +18,7 @@ Mailbox layout (under ~/JARVIS/coder_bridge/ by default, or next to this file):
   inbox/<id>.json   — pending requests
   outbox/<id>.json  — replies written by the worker
 
-Optional auto-handler: set CODER_BRIDGE_AUTO=echo to answer in-process with a
+Optional auto-handler: set CODER_BRIDGE_AUTO=echo to answer in-process with a short
 Coder-marked echo (smoke only; no worker needed).
 """
 
@@ -112,11 +112,9 @@ def _auto_reply(message: str, context: dict[str, Any] | None, req_id: str) -> st
     """In-process handler for smoke tests. Returns reply text or None to wait for worker."""
     mode = _auto_mode()
     if mode == "echo":
-        src = (context or {}).get("source", "jarvis")
-        return (
-            f"[Coder echo] id={req_id} source={src} "
-            f"message={message!r}"
-        )
+        # Spoken-friendly; never leak mailbox ids / source into TTS path.
+        _ = (message, context, req_id)
+        return "Coder received your message."
     return None
 
 

@@ -7,7 +7,7 @@ outbox. Coder (remote box) drives this via Shell on machineId
 
 Modes:
   --once --reply TEXT   Answer the oldest pending request with TEXT, then exit.
-  --once --echo         Answer oldest with a Coder-marked echo, then exit.
+  --once --echo         Answer oldest with a short spoken ack, then exit.
   --echo                Poll forever; echo every request.
   --once                Print oldest request as one JSON line to stdout; wait for
                         a reply line on stdin (or use --reply / --echo).
@@ -104,10 +104,9 @@ def write_reply(req_id: str, reply: str, *, extra: dict[str, Any] | None = None)
 
 
 def echo_reply(req: dict[str, Any]) -> str:
-    msg = str(req.get("message", ""))
-    rid = str(req.get("id", ""))
-    src = (req.get("context") or {}).get("source", "jarvis") if isinstance(req.get("context"), dict) else "jarvis"
-    return f"[Coder] echo id={rid} source={src}: {msg}"
+    """Short spoken-friendly ack — never include ids, source, or raw message dump."""
+    _ = req  # request available if a future echo wants a brief paraphrase
+    return "Coder received your message."
 
 
 def _poll_interval() -> float:
@@ -143,7 +142,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--echo",
         action="store_true",
-        help="Reply with a Coder-marked echo of the message",
+        help="Reply with a short spoken-friendly ack (no ids/metadata)",
     )
     parser.add_argument(
         "--wait",

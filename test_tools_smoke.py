@@ -556,6 +556,37 @@ class ToolSmokeTests(unittest.TestCase):
         self.assertIn("Coder bridge error", err)
         self.assertIn("timeout", err)
 
+    def test_format_ask_coder_reply_strips_echo_metadata(self) -> None:
+        # Legacy worker format must not reach TTS/HUD.
+        legacy = (
+            "[Coder] echo id=d2f72d175b994faca0ff232d8f9b3a06 "
+            "source=jarvis-tool: tell coder hello"
+        )
+        cleaned = jarvis._format_ask_coder_reply(
+            json.dumps({"ok": True, "reply": legacy, "id": "d2f72d175b994faca0ff232d8f9b3a06"})
+        )
+        self.assertNotIn("echo id", cleaned.lower())
+        self.assertNotIn("d2f72d", cleaned.lower())
+        self.assertNotIn("source=", cleaned.lower())
+        self.assertNotIn("[coder]", cleaned.lower())
+        self.assertNotIn("{", cleaned)
+        # Auto-mode legacy format
+        auto = (
+            "[Coder echo] id=abc123 source=jarvis "
+            "message='tell Coder hello'"
+        )
+        cleaned2 = jarvis._format_ask_coder_reply(
+            json.dumps({"ok": True, "reply": auto})
+        )
+        self.assertNotIn("echo", cleaned2.lower())
+        self.assertNotIn("abc123", cleaned2.lower())
+        self.assertNotIn("source=", cleaned2.lower())
+        # Clean echo ack passes through unchanged
+        ack = jarvis._format_ask_coder_reply(
+            json.dumps({"ok": True, "reply": "Coder received your message."})
+        )
+        self.assertEqual(ack, "Coder received your message.")
+
     def test_force_ask_coder_turn_skips_llm_preamble(self) -> None:
         import unittest.mock as mock
 
