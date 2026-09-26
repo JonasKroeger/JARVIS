@@ -1,4 +1,4 @@
-"""JARVIS HUD — floating neural brain. Synapses light when speaking."""
+"""JARVIS HUD — floating synapse-filament brain. Axons light when speaking."""
 
 from __future__ import annotations
 
@@ -361,12 +361,14 @@ class CaptionStack(QWidget):
 
 @dataclass
 class _Node:
+    """Scaffold junction for filaments — not drawn as a visible circle."""
+
     x: float
     y: float
     z: float
-    r: float
+    r: float  # kept for layering hints; paint ignores as disc size
     flash: float = 0.0
-    layer: int = 1  # 0=deep core, 1=mid, 2=cortex (parallax / brightness)
+    layer: int = 1  # 0=deep core, 1=mid, 2=cortex
 
 
 @dataclass
@@ -410,12 +412,18 @@ def _in_brain(x: float, y: float, z: float) -> bool:
     return True
 
 
+def _radial(x: float, y: float, z: float) -> float:
+    """0 = deep core, 1 = outer cortex (approx)."""
+    ax = abs(x) - 0.12
+    return min(1.0, math.sqrt(max(0.0, ax * ax) / 0.55 + (y * y) / 0.42 + (z * z) / 0.38))
+
+
 def _build_brain(seed: int = 42) -> _BrainGraph:
-    """Denser neural graph — finished look, still procedural."""
+    """Dense filament scaffold — brain silhouette from axons, not node dots."""
     rng = random.Random(seed)
     nodes: list[_Node] = []
 
-    def _add(x: float, y: float, z: float, r: float, layer: int, min_d2: float = 0.028) -> bool:
+    def _add(x: float, y: float, z: float, r: float, layer: int, min_d2: float = 0.018) -> bool:
         for n in nodes:
             dx, dy, dz = n.x - x, n.y - y, n.z - z
             if dx * dx + dy * dy + dz * dz < min_d2:
@@ -423,140 +431,136 @@ def _build_brain(seed: int = 42) -> _BrainGraph:
         nodes.append(_Node(x=x, y=y, z=z, r=r, layer=layer))
         return True
 
-    # —— Dense cortex shell (surface preference) ——
+    # —— Cortex shell (silhouette read) ——
     attempts = 0
-    while len(nodes) < 64 and attempts < 4500:
+    while len(nodes) < 78 and attempts < 5500:
         attempts += 1
         x = rng.uniform(-1.08, 1.08)
         y = rng.uniform(-0.72, 0.75)
         z = rng.uniform(-0.72, 0.72)
         if not _in_brain(x, y, z):
             continue
-        # Push toward cortex surface for silhouette read
         nrm = math.sqrt(x * x + y * y + z * z) or 1.0
-        if rng.random() < 0.72:
-            push = 0.10 + rng.random() * 0.16
+        if rng.random() < 0.78:
+            push = 0.10 + rng.random() * 0.18
             x *= 1.0 + push / nrm
             y *= 1.0 + push / nrm * 0.82
             z *= 1.0 + push / nrm
-        layer = 2
-        r = 0.022 + rng.random() * 0.020
-        _add(x, y, z, r, layer, min_d2=0.036)
+        _add(x, y, z, 0.012 + rng.random() * 0.010, layer=2, min_d2=0.024)
 
-    # —— Mid-depth fill (volume, not just shell) ——
+    # —— Mid-depth volume fill ——
     attempts = 0
-    target_mid = len(nodes) + 22
-    while len(nodes) < target_mid and attempts < 3500:
+    target_mid = len(nodes) + 36
+    while len(nodes) < target_mid and attempts < 4500:
         attempts += 1
-        x = rng.uniform(-0.85, 0.85)
-        y = rng.uniform(-0.55, 0.55)
-        z = rng.uniform(-0.55, 0.55)
+        x = rng.uniform(-0.88, 0.88)
+        y = rng.uniform(-0.58, 0.58)
+        z = rng.uniform(-0.58, 0.58)
         if not _in_brain(x * 0.95, y * 0.95, z * 0.95):
             continue
-        # Keep away from surface a bit
         nrm = math.sqrt(x * x + y * y + z * z)
-        if nrm > 0.78:
+        if nrm > 0.80:
             continue
-        _add(x, y, z, 0.016 + rng.random() * 0.014, layer=1, min_d2=0.038)
+        _add(x, y, z, 0.010 + rng.random() * 0.008, layer=1, min_d2=0.022)
 
-    # —— Deep core nuclei (small, dimmer later) ——
+    # —— Deep core (warmer filaments later) ——
     attempts = 0
-    target_core = len(nodes) + 10
-    while len(nodes) < target_core and attempts < 2000:
+    target_core = len(nodes) + 18
+    while len(nodes) < target_core and attempts < 3000:
         attempts += 1
-        x = rng.uniform(-0.45, 0.45)
-        y = rng.uniform(-0.35, 0.35)
-        z = rng.uniform(-0.35, 0.35)
+        x = rng.uniform(-0.48, 0.48)
+        y = rng.uniform(-0.38, 0.38)
+        z = rng.uniform(-0.38, 0.38)
         if abs(x) < 0.08 and y > -0.05:
             continue
         if not _in_brain(x, y, z):
             continue
-        _add(x, y, z, 0.012 + rng.random() * 0.010, layer=0, min_d2=0.045)
+        if _radial(x, y, z) > 0.55:
+            continue
+        _add(x, y, z, 0.008 + rng.random() * 0.006, layer=0, min_d2=0.028)
 
-    # Guaranteed silhouette / lobe / stem anchors
+    # Silhouette / lobe / stem anchors (keep shape readable)
     anchors = [
-        (-0.58, 0.18, 0.12, 0.038, 2),
-        (0.58, 0.18, 0.12, 0.038, 2),
-        (-0.74, -0.02, 0.02, 0.036, 2),
-        (0.74, -0.02, 0.02, 0.036, 2),
-        (-0.48, 0.42, 0.18, 0.034, 2),
-        (0.48, 0.42, 0.18, 0.034, 2),
-        (-0.42, 0.38, -0.22, 0.030, 2),
-        (0.42, 0.38, -0.22, 0.030, 2),
-        (-0.28, -0.38, 0.08, 0.032, 1),
-        (0.28, -0.38, 0.08, 0.032, 1),
-        (0.0, -0.52, 0.0, 0.040, 1),
-        (-0.18, 0.08, 0.40, 0.030, 2),
-        (0.18, 0.08, 0.40, 0.030, 2),
-        (-0.18, 0.08, -0.40, 0.030, 2),
-        (0.18, 0.08, -0.40, 0.030, 2),
-        (-0.62, 0.22, -0.18, 0.028, 2),
-        (0.62, 0.22, -0.18, 0.028, 2),
-        (-0.35, -0.15, 0.28, 0.026, 1),
-        (0.35, -0.15, 0.28, 0.026, 1),
-        (-0.12, 0.28, 0.05, 0.024, 1),
-        (0.12, 0.28, 0.05, 0.024, 1),
+        (-0.58, 0.18, 0.12, 0.014, 2),
+        (0.58, 0.18, 0.12, 0.014, 2),
+        (-0.74, -0.02, 0.02, 0.014, 2),
+        (0.74, -0.02, 0.02, 0.014, 2),
+        (-0.48, 0.42, 0.18, 0.013, 2),
+        (0.48, 0.42, 0.18, 0.013, 2),
+        (-0.42, 0.38, -0.22, 0.012, 2),
+        (0.42, 0.38, -0.22, 0.012, 2),
+        (-0.28, -0.38, 0.08, 0.012, 1),
+        (0.28, -0.38, 0.08, 0.012, 1),
+        (0.0, -0.52, 0.0, 0.014, 1),
+        (-0.18, 0.08, 0.40, 0.012, 2),
+        (0.18, 0.08, 0.40, 0.012, 2),
+        (-0.18, 0.08, -0.40, 0.012, 2),
+        (0.18, 0.08, -0.40, 0.012, 2),
+        (-0.62, 0.22, -0.18, 0.012, 2),
+        (0.62, 0.22, -0.18, 0.012, 2),
+        (-0.35, -0.15, 0.28, 0.011, 1),
+        (0.35, -0.15, 0.28, 0.011, 1),
+        (-0.12, 0.28, 0.05, 0.010, 1),
+        (0.12, 0.28, 0.05, 0.010, 1),
+        (-0.08, -0.08, 0.05, 0.009, 0),
+        (0.08, -0.08, 0.05, 0.009, 0),
+        (0.0, 0.05, -0.08, 0.009, 0),
     ]
     for ax, ay, az, ar, al in anchors:
-        _add(ax, ay, az, ar, al, min_d2=0.018)
+        _add(ax, ay, az, ar, al, min_d2=0.012)
 
-    # Micro-nodes — density glitter (tiny, mostly visual)
+    # Extra cortex glitter points — junctions only, never drawn as discs
     attempts = 0
-    micro_target = len(nodes) + 36
-    while len(nodes) < micro_target and attempts < 4000:
+    micro_target = len(nodes) + 48
+    while len(nodes) < micro_target and attempts < 5000:
         attempts += 1
         x = rng.uniform(-1.0, 1.0)
         y = rng.uniform(-0.68, 0.70)
         z = rng.uniform(-0.68, 0.68)
         if not _in_brain(x, y, z):
             continue
-        _add(x, y, z, 0.008 + rng.random() * 0.008, layer=2 if rng.random() < 0.6 else 1, min_d2=0.014)
+        _add(x, y, z, 0.006 + rng.random() * 0.005, layer=2 if rng.random() < 0.65 else 1, min_d2=0.010)
 
-    # k-NN edges + commissural bridges
+    # Dense k-NN filament edges + commissural bridges
     edges: list[_Edge] = []
     seen: set[tuple[int, int]] = set()
-    k = 3
+    k = 4
     for i, ni in enumerate(nodes):
-        # Skip pure micro glitter as edge sources (keeps FPS)
-        if ni.r < 0.014:
-            continue
         dists: list[tuple[float, int]] = []
         for j, nj in enumerate(nodes):
             if i == j:
                 continue
-            # Prefer linking to real nodes; allow some micro tips
-            if nj.r < 0.014 and rng.random() > 0.25:
-                continue
             dx, dy, dz = ni.x - nj.x, ni.y - nj.y, ni.z - nj.z
-            dists.append((dx * dx + dy * dy + dz * dz, j))
+            d2 = dx * dx + dy * dy + dz * dz
+            if d2 > 0.70:
+                continue
+            dists.append((d2, j))
         dists.sort()
-        # Cortex gets one extra local link for density
-        take = k + (1 if ni.layer >= 2 else 0)
+        take = k + (1 if ni.layer >= 2 else 0) + (1 if ni.layer == 0 else 0)
         for _, j in dists[:take]:
             a, b = (i, j) if i < j else (j, i)
             if (a, b) in seen:
                 continue
             # Prefer same-hemisphere; allow some cross
             if nodes[a].x * nodes[b].x < 0 and abs(nodes[a].x) > 0.14 and abs(nodes[b].x) > 0.14:
-                if rng.random() > 0.18:
+                if rng.random() > 0.22:
                     continue
-            # Skip very long edges (cheap look)
-            if dists[0][0] > 0 and _ > 0:
-                pass
             dx = nodes[a].x - nodes[b].x
             dy = nodes[a].y - nodes[b].y
             dz = nodes[a].z - nodes[b].z
-            if dx * dx + dy * dy + dz * dz > 0.85:
+            if dx * dx + dy * dy + dz * dz > 0.72:
                 continue
             seen.add((a, b))
-            edges.append(_Edge(a=a, b=b, curl=rng.uniform(-0.42, 0.42)))
+            # Stronger curl on cortex for organic tangle
+            curl_span = 0.55 if max(nodes[a].layer, nodes[b].layer) >= 2 else 0.38
+            edges.append(_Edge(a=a, b=b, curl=rng.uniform(-curl_span, curl_span)))
 
     # Explicit corpus callosum bridges
     left = [i for i, n in enumerate(nodes) if n.x < -0.10]
     right = [i for i, n in enumerate(nodes) if n.x > 0.10]
     bridges = 0
     tries = 0
-    while bridges < 10 and tries < 80 and left and right:
+    while bridges < 14 and tries < 100 and left and right:
         tries += 1
         a = rng.choice(left)
         b = rng.choice(right)
@@ -574,11 +578,46 @@ def _build_brain(seed: int = 42) -> _BrainGraph:
     return _BrainGraph(nodes=nodes, edges=edges)
 
 
+def _lerp_rgb(a: tuple[int, int, int], b: tuple[int, int, int], t: float) -> tuple[int, int, int]:
+    t = max(0.0, min(1.0, t))
+    return (
+        int(a[0] + (b[0] - a[0]) * t),
+        int(a[1] + (b[1] - a[1]) * t),
+        int(a[2] + (b[2] - a[2]) * t),
+    )
+
+
+# Warm dense core → cool cyan outer mesh (reference palette)
+_CORE_RGB = (255, 92, 48)       # hot orange-red
+_CORE_MID = (255, 150, 70)      # amber
+_OUTER_RGB = (90, 210, 235)     # cyan-teal
+_OUTER_SOFT = (120, 230, 250)   # bright cyan tip
+
+
+def _filament_rgb(radial: float, lit: float = 0.0) -> tuple[int, int, int]:
+    """radial 0=core (warm), 1=cortex (cyan). lit pushes toward hotter/brighter."""
+    if radial < 0.35:
+        t = radial / 0.35
+        rgb = _lerp_rgb(_CORE_RGB, _CORE_MID, t)
+    elif radial < 0.65:
+        t = (radial - 0.35) / 0.30
+        rgb = _lerp_rgb(_CORE_MID, _OUTER_RGB, t)
+    else:
+        t = (radial - 0.65) / 0.35
+        rgb = _lerp_rgb(_OUTER_RGB, _OUTER_SOFT, t)
+    if lit > 0.0:
+        # Lit filaments wash toward hot white-cyan
+        hot = (255, 240, 220) if radial < 0.45 else (220, 250, 255)
+        rgb = _lerp_rgb(rgb, hot, min(1.0, lit * 0.85))
+    return rgb
+
+
 class OrbVisualizer(QWidget):
-    """Floating procedural neural brain — synapses light on talk.
+    """Floating procedural neural brain — synapse filaments light on talk.
 
     Hold-click (or Space from parent) drives listening. States:
     idle / listening / thinking / speaking.
+    Brain form is a dense body of axons (no prominent node circles).
     """
 
     IDLE = "idle"
@@ -622,14 +661,14 @@ class OrbVisualizer(QWidget):
         self.update()
 
     def _activity(self) -> tuple[float, float, float, int]:
-        """Return (spawn_rate, pulse_speed, node_glow, pulse_cap) by state."""
+        """Return (spawn_rate, pulse_speed, glow_mul, pulse_cap) by state."""
         if self._state == self.SPEAKING:
-            return 9.5, 1.65, 1.15, 48
+            return 10.5, 1.70, 1.18, 52
         if self._state == self.LISTENING:
             return 3.8, 1.15, 0.88, 28
         if self._state == self.THINKING:
             return 5.5, 1.35, 0.98, 36
-        return 0.65, 0.55, 0.48, 12
+        return 0.70, 0.55, 0.50, 14
 
     def _tick(self) -> None:
         # Adaptive cadence: quieter idle, snappier when talking
@@ -676,9 +715,10 @@ class OrbVisualizer(QWidget):
                     )
                 )
                 e = self._graph.edges[ei]
-                flash_a = 0.85 if self._state == self.SPEAKING else 0.70
+                # Soft endpoint energize (feeds filament brightness, not discs)
+                flash_a = 0.70 if self._state == self.SPEAKING else 0.45
                 self._graph.nodes[e.a].flash = max(self._graph.nodes[e.a].flash, flash_a)
-                self._graph.nodes[e.b].flash = max(self._graph.nodes[e.b].flash, flash_a * 0.75)
+                self._graph.nodes[e.b].flash = max(self._graph.nodes[e.b].flash, flash_a * 0.7)
                 self._lit_edges[ei] = max(self._lit_edges.get(ei, 0.0), 1.0)
             burst = 1  # only first spawn in the accumulator burst
 
@@ -693,17 +733,12 @@ class OrbVisualizer(QWidget):
             self._lit_edges[p.edge] = max(self._lit_edges.get(p.edge, 0.0), 0.55 + 0.45 * (1.0 - p.t))
             if p.t < 1.0:
                 alive.append(p)
-                # Mid-travel node shimmer near pulse
-                if 0.35 < p.t < 0.65 and self._state == self.SPEAKING:
-                    e = self._graph.edges[p.edge]
-                    self._graph.nodes[e.a].flash = max(self._graph.nodes[e.a].flash, 0.35)
-                    self._graph.nodes[e.b].flash = max(self._graph.nodes[e.b].flash, 0.45)
             else:
                 e = self._graph.edges[p.edge]
-                hit = p.bright * (1.15 if self._state == self.SPEAKING else 1.0)
+                hit = p.bright * (0.85 if self._state == self.SPEAKING else 0.55)
                 self._graph.nodes[e.b].flash = max(self._graph.nodes[e.b].flash, hit)
-                # Cascade spark queued separately (cap runaway)
-                if self._state == self.SPEAKING and self._rng.random() < 0.32:
+                # Cascade spark along connected filament
+                if self._state == self.SPEAKING and self._rng.random() < 0.34:
                     for j, ej in enumerate(self._graph.edges):
                         if j == p.edge:
                             continue
@@ -719,14 +754,13 @@ class OrbVisualizer(QWidget):
                             )
                             self._lit_edges[j] = max(self._lit_edges.get(j, 0.0), 0.8)
                             break
-        # Merge cascades without exceeding cap
         for c in cascades:
             if len(alive) >= pulse_cap:
                 break
             alive.append(c)
         self._pulses = alive
 
-        # Decay node flashes + axon glow
+        # Decay junction energy + axon glow
         decay = (2.1 if self._state == self.SPEAKING else 2.8) * dt
         for n in self._graph.nodes:
             n.flash = max(0.0, n.flash - decay)
@@ -793,7 +827,6 @@ class OrbVisualizer(QWidget):
         cp, sp = math.cos(pitch), math.sin(pitch)
         y2 = yr * cp - zr * sp
         z2 = yr * sp + zr * cp
-        # Slight layer parallax shift
         xr += parallax * 0.04 * math.sin(self._yaw + 0.5)
         persp = 1.0 / (1.0 + z2 * 0.36)
         sx = cx + xr * scale * persp
@@ -831,7 +864,7 @@ class OrbVisualizer(QWidget):
         cx, cy = w / 2.0, h / 2.0 - h * 0.015 + self._bob * min(w, h) * 0.12
         scale = min(w, h) * 0.40
 
-        spawn_rate, _, glow_mul, _ = self._activity()
+        _, _, glow_mul, _ = self._activity()
         breathe = 0.90 + 0.10 * (0.5 + 0.5 * math.sin(self._phase * 1.05))
         intensity = glow_mul * breathe
         speaking = self._state == self.SPEAKING
@@ -847,96 +880,63 @@ class OrbVisualizer(QWidget):
         painter.setBrush(sh)
         painter.drawEllipse(QPointF(cx, shadow_y), scale * 0.85, scale * 0.22)
 
-        # —— Far parallax bloom (deeper layer, offset) ——
+        # —— Soft volumetric glow: warm core, cool outer (reference) ——
+        # Deep warm core bloom
+        core_glow = QRadialGradient(QPointF(cx, cy + scale * 0.02), scale * 0.55)
+        core_glow.setColorAt(0.0, QColor(255, 110, 55, _a(55 * intensity)))
+        core_glow.setColorAt(0.35, QColor(220, 90, 45, _a(28 * intensity)))
+        core_glow.setColorAt(0.70, QColor(80, 40, 30, _a(10 * intensity)))
+        core_glow.setColorAt(1.0, QColor(0, 0, 0, 0))
+        painter.setBrush(core_glow)
+        painter.drawEllipse(QPointF(cx, cy), scale * 0.58, scale * 0.50)
+
+        # Cool cyan outer haze
         far_cx = cx - scale * 0.04 * math.sin(self._yaw)
         far_cy = cy + scale * 0.02
         for bloom_r, bloom_a in (
-            (scale * 1.55, 14),
-            (scale * 1.15, 24),
+            (scale * 1.45, 16),
+            (scale * 1.05, 22),
         ):
             glow = QRadialGradient(QPointF(far_cx, far_cy), bloom_r)
-            c0 = QColor(70, 160, 200)
-            c0.setAlpha(_a(bloom_a * intensity * 0.75))
-            c1 = QColor(40, 100, 140)
-            c1.setAlpha(_a(bloom_a * 0.2 * intensity))
+            c0 = QColor(70, 175, 210)
+            c0.setAlpha(_a(bloom_a * intensity * 0.80))
+            c1 = QColor(35, 100, 140)
+            c1.setAlpha(_a(bloom_a * 0.22 * intensity))
             glow.setColorAt(0.0, c0)
-            glow.setColorAt(0.5, c1)
+            glow.setColorAt(0.55, c1)
             glow.setColorAt(1.0, QColor(0, 0, 0, 0))
             painter.setBrush(glow)
-            painter.drawEllipse(QPointF(far_cx, far_cy), bloom_r * 1.18, bloom_r * 0.90)
+            painter.drawEllipse(QPointF(far_cx, far_cy), bloom_r * 1.15, bloom_r * 0.88)
 
-        # —— Twin hemisphere glass volumes + medial cleft ——
+        # Twin hemisphere soft volume (subtle glass, not chrome)
         hemi_sep = scale * 0.16
         for sign, hx_off in ((-1, -hemi_sep), (1, hemi_sep)):
             hx = cx + hx_off * math.cos(self._yaw * 0.35)
             hy = cy - scale * 0.06
-            glass = QRadialGradient(QPointF(hx - sign * scale * 0.10, hy - scale * 0.14), scale * 0.82)
-            glass.setColorAt(0.0, QColor(120, 200, 225, _a(40 * intensity)))
-            glass.setColorAt(0.28, QColor(40, 95, 130, _a(72)))
-            glass.setColorAt(0.58, QColor(12, 36, 55, _a(95)))
-            glass.setColorAt(0.82, QColor(8, 22, 36, _a(50)))
+            glass = QRadialGradient(QPointF(hx - sign * scale * 0.10, hy - scale * 0.14), scale * 0.78)
+            glass.setColorAt(0.0, QColor(100, 190, 220, _a(22 * intensity)))
+            glass.setColorAt(0.30, QColor(30, 70, 100, _a(40)))
+            glass.setColorAt(0.65, QColor(10, 28, 42, _a(55)))
             glass.setColorAt(1.0, QColor(0, 0, 0, 0))
             painter.setBrush(glass)
-            # Wider than tall lobe — brain mass, not a ball
-            painter.drawEllipse(QPointF(hx, hy), scale * 0.70, scale * 0.64)
+            painter.drawEllipse(QPointF(hx, hy), scale * 0.68, scale * 0.62)
 
-        # Medial cleft shadow (reads as longitudinal fissure)
+        # Medial cleft shadow
         cleft = QRadialGradient(QPointF(cx, cy - scale * 0.02), scale * 0.55)
-        cleft.setColorAt(0.0, QColor(4, 12, 22, _a(70)))
-        cleft.setColorAt(0.25, QColor(6, 16, 28, _a(40)))
+        cleft.setColorAt(0.0, QColor(4, 12, 22, _a(65)))
+        cleft.setColorAt(0.25, QColor(6, 16, 28, _a(36)))
         cleft.setColorAt(0.55, QColor(0, 0, 0, 0))
         cleft.setColorAt(1.0, QColor(0, 0, 0, 0))
         painter.setBrush(cleft)
-        painter.drawEllipse(QPointF(cx, cy), scale * 0.22, scale * 0.72)
+        painter.drawEllipse(QPointF(cx, cy), scale * 0.20, scale * 0.70)
 
-        # Soft brainstem / cerebellum lower mass
-        stem = QRadialGradient(QPointF(cx, cy + scale * 0.42), scale * 0.38)
-        stem.setColorAt(0.0, QColor(60, 140, 175, _a(48 * intensity)))
-        stem.setColorAt(0.55, QColor(20, 50, 72, _a(50)))
+        # Soft brainstem lower mass
+        stem = QRadialGradient(QPointF(cx, cy + scale * 0.42), scale * 0.36)
+        stem.setColorAt(0.0, QColor(70, 150, 185, _a(36 * intensity)))
+        stem.setColorAt(0.55, QColor(20, 50, 72, _a(40)))
         stem.setColorAt(1.0, QColor(0, 0, 0, 0))
         painter.setBrush(stem)
-        painter.drawEllipse(QPointF(cx, cy + scale * 0.40), scale * 0.42, scale * 0.28)
-
-        # —— Rim lighting (lit edge silhouette) ——
-        rim_ang = self._yaw + 0.6
-        rim_x = cx + math.cos(rim_ang) * scale * 0.55
-        rim_y = cy - scale * 0.20 + math.sin(rim_ang) * scale * 0.15
-        rim = QRadialGradient(QPointF(rim_x, rim_y), scale * 0.95)
-        rim.setColorAt(0.0, QColor(160, 230, 250, _a(42 * intensity)))
-        rim.setColorAt(0.25, QColor(90, 185, 220, _a(22 * intensity)))
-        rim.setColorAt(0.55, QColor(0, 0, 0, 0))
-        rim.setColorAt(1.0, QColor(0, 0, 0, 0))
-        painter.setBrush(rim)
-        painter.drawEllipse(QPointF(cx, cy), scale * 1.05, scale * 0.82)
-
-
-        # —— Soft brain silhouette (two lobes + stem) for finished volume read ——
-        sil = QPainterPath()
-        # Left lobe
-        sil.addEllipse(QPointF(cx - scale * 0.28, cy - scale * 0.04), scale * 0.58, scale * 0.62)
-        # Right lobe
-        sil.addEllipse(QPointF(cx + scale * 0.28, cy - scale * 0.04), scale * 0.58, scale * 0.62)
-        # Stem
-        sil.addEllipse(QPointF(cx, cy + scale * 0.42), scale * 0.28, scale * 0.22)
-        pen_sil = QPen(_q(C_CYAN_SOFT, 55 * intensity), 1.8)
-        pen_sil.setCosmetic(True)
-        painter.setPen(pen_sil)
-        painter.setBrush(Qt.BrushStyle.NoBrush)
-        painter.drawPath(sil)
-        # Inner cleft line
-        cleft_path = QPainterPath()
-        cleft_path.moveTo(cx, cy - scale * 0.48)
-        cleft_path.quadTo(cx + scale * 0.02, cy - scale * 0.05, cx, cy + scale * 0.28)
-        painter.setPen(QPen(QColor(4, 12, 22, _a(130)), 3.0))
-        painter.drawPath(cleft_path)
-
-        # Front bloom for presence
-        near = QRadialGradient(QPointF(cx - scale * 0.05, cy - scale * 0.12), scale * 0.95)
-        near.setColorAt(0.0, QColor(100, 200, 230, _a(28 * intensity)))
-        near.setColorAt(0.4, QColor(45, 115, 155, _a(16 * intensity)))
-        near.setColorAt(1.0, QColor(0, 0, 0, 0))
-        painter.setBrush(near)
-        painter.drawEllipse(QPointF(cx, cy), scale * 1.08, scale * 0.84)
+        painter.drawEllipse(QPointF(cx, cy + scale * 0.40), scale * 0.40, scale * 0.26)
 
         nodes = self._graph.nodes
         edges = self._graph.edges
@@ -944,17 +944,16 @@ class OrbVisualizer(QWidget):
         # Project with slight layer parallax
         proj: list[tuple[float, float, float]] = []
         for n in nodes:
-            par = (n.layer - 1) * 0.55  # deep back, cortex forward shift
+            par = (n.layer - 1) * 0.55
             proj.append(self._project(n.x, n.y, n.z, cx, cy, scale, parallax=par))
 
-        # Which edges currently carry a pulse (for bright pathway)
         pulse_on: dict[int, _Pulse] = {}
         for p in self._pulses:
             prev = pulse_on.get(p.edge)
             if prev is None or p.bright > prev.bright:
                 pulse_on[p.edge] = p
 
-        # Draw axons back-to-front
+        # —— Dense filament body (brain = axons, not dots) ——
         edge_order = list(range(len(edges)))
         edge_order.sort(key=lambda i: (proj[edges[i].a][2] + proj[edges[i].b][2]) * 0.5)
 
@@ -965,32 +964,44 @@ class OrbVisualizer(QWidget):
             flash = max(na.flash, nb.flash)
             lit = self._lit_edges.get(ei, 0.0)
             on_pulse = ei in pulse_on
-            base_a = 38 + 70 * mid_d
-            base_a += flash * 120
-            base_a += lit * 130
+            rad = (_radial(na.x, na.y, na.z) + _radial(nb.x, nb.y, nb.z)) * 0.5
+
+            # Soft DoF: back filaments dimmer / softer
+            dof = 0.42 + 0.58 * mid_d
+            base_a = (48 + 55 * mid_d) * dof
+            base_a += flash * 90
+            base_a += lit * 110
             if on_pulse:
-                base_a += 110
+                base_a += 95
             base_a *= 0.55 + 0.45 * intensity
-            # Depth haze: push back axons into soft occlusion
-            base_a *= 0.50 + 0.50 * mid_d
-            width = 1.15 + flash * 1.05 + lit * 0.85
+
+            width = 0.85 + 0.35 * (1.0 - rad)  # core filaments slightly thicker
+            width += flash * 0.55 + lit * 0.70
             if on_pulse:
-                width += 1.45 * pulse_on[ei].width
-            if speaking and (on_pulse or lit > 0.3):
-                pen = QPen(_q(C_CYAN_GLOW if on_pulse else C_CYAN, base_a), width)
-            else:
-                pen = QPen(_q(C_CYAN_SOFT, base_a), width)
+                width += 1.15 * pulse_on[ei].width
+            # Back filaments slightly thicker soft haze
+            if mid_d < 0.40:
+                width += 0.35
+
+            rgb = _filament_rgb(rad, lit=max(lit, flash * 0.6) + (0.55 if on_pulse else 0.0))
+            if speaking and (on_pulse or lit > 0.35):
+                # Speaking wash — slightly hotter
+                rgb = _lerp_rgb(rgb, (255, 245, 230) if rad < 0.45 else (210, 248, 255), 0.25)
+
+            pen = QPen(QColor(rgb[0], rgb[1], rgb[2], _a(base_a)), width)
             pen.setCapStyle(Qt.PenCapStyle.RoundCap)
             painter.setPen(pen)
             painter.setBrush(Qt.BrushStyle.NoBrush)
+
             sa = proj[e.a]
             sb = proj[e.b]
-            if flash > 0.12 or lit > 0.15 or on_pulse:
+            use_curve = flash > 0.08 or lit > 0.10 or on_pulse or abs(e.curl) > 0.28
+            if use_curve:
                 p0, p1, p2 = self._axon_points(na.x, na.y, na.z, nb.x, nb.y, nb.z, e.curl)
                 path = QPainterPath()
                 s0 = self._project(*p0, cx, cy, scale)
                 path.moveTo(s0[0], s0[1])
-                steps = 6 if (on_pulse or speaking) else 4
+                steps = 7 if (on_pulse or speaking) else 4
                 for s in range(1, steps + 1):
                     tt = s / steps
                     bx, by, bz = self._bezier(p0, p1, p2, tt)
@@ -1000,100 +1011,95 @@ class OrbVisualizer(QWidget):
             else:
                 painter.drawLine(QPointF(sa[0], sa[1]), QPointF(sb[0], sb[1]))
 
-        # —— Traveling synapse pulses (vivid core + multi-segment trail) ——
+            # Pulse lights the FILAMENT — bright segment around pulse.t (not a disc burst)
+            if on_pulse:
+                pp = pulse_on[ei]
+                p0, p1, p2 = self._axon_points(na.x, na.y, na.z, nb.x, nb.y, nb.z, e.curl)
+                seg = QPainterPath()
+                t0 = max(0.0, pp.t - 0.18)
+                t1 = min(1.0, pp.t + 0.06)
+                steps = 5
+                first = True
+                for s in range(steps + 1):
+                    tt = t0 + (t1 - t0) * (s / steps)
+                    bx, by, bz = self._bezier(p0, p1, p2, tt)
+                    sx, sy, _ = self._project(bx, by, bz, cx, cy, scale)
+                    if first:
+                        seg.moveTo(sx, sy)
+                        first = False
+                    else:
+                        seg.lineTo(sx, sy)
+                glow_rgb = _filament_rgb(rad, lit=1.0)
+                gpen = QPen(
+                    QColor(glow_rgb[0], glow_rgb[1], glow_rgb[2], _a(200 * pp.bright * intensity)),
+                    width + 1.6 * pp.width,
+                )
+                gpen.setCapStyle(Qt.PenCapStyle.RoundCap)
+                painter.setPen(gpen)
+                painter.drawPath(seg)
+                # Hot core streak
+                hpen = QPen(QColor(255, 252, 245, _a(210 * pp.bright)), max(1.0, width * 0.55))
+                hpen.setCapStyle(Qt.PenCapStyle.RoundCap)
+                painter.setPen(hpen)
+                painter.drawPath(seg)
+
+        # —— Traveling pulses: tiny spark along filament (nearly invisible discs) ——
         painter.setPen(Qt.PenStyle.NoPen)
         for p in self._pulses:
             e = edges[p.edge]
             na, nb = nodes[e.a], nodes[e.b]
             p0, p1, p2 = self._axon_points(na.x, na.y, na.z, nb.x, nb.y, nb.z, e.curl)
-            trail_n = 5 if speaking else 3
+            # Short trail of pinpoints riding the axon
+            trail_n = 3 if speaking else 2
             for k in range(trail_n, -1, -1):
-                tt = p.t - k * (0.045 if speaking else 0.055)
+                tt = p.t - k * 0.04
                 if tt < 0.0:
                     continue
                 bx, by, bz = self._bezier(p0, p1, p2, tt)
                 sx, sy, depth = self._project(bx, by, bz, cx, cy, scale)
                 fade = 1.0 - k / (trail_n + 1.2)
-                pr = (4.6 + 3.2 * p.bright) * (0.65 + 0.35 * depth) * p.width * fade
+                # Tiny — subordinate to the filament, not a node graph
+                pr = (1.15 + 0.55 * p.bright) * (0.70 + 0.30 * depth) * fade
                 if k == 0:
-                    pr *= 1.45
-                g = QRadialGradient(QPointF(sx, sy), pr * (3.4 if k == 0 else 2.4))
-                if k == 0:
-                    core = QColor(230, 252, 255)
-                    core.setAlpha(_a(255 * p.bright * min(1.2, intensity)))
-                    mid = QColor(140, 235, 255)
-                    mid.setAlpha(_a(160 * p.bright * intensity))
-                else:
-                    core = QColor(160, 235, 255)
-                    core.setAlpha(_a(140 * p.bright * intensity * fade))
-                    mid = QColor(90, 200, 230)
-                    mid.setAlpha(_a(70 * p.bright * intensity * fade))
+                    pr *= 1.35
+                rad = (_radial(na.x, na.y, na.z) + _radial(nb.x, nb.y, nb.z)) * 0.5
+                rgb = _filament_rgb(rad, lit=1.0)
+                g = QRadialGradient(QPointF(sx, sy), pr * 2.2)
+                core = QColor(255, 250, 240) if rad < 0.45 else QColor(230, 250, 255)
+                core.setAlpha(_a((200 if k == 0 else 90) * p.bright * intensity * fade))
+                mid = QColor(rgb[0], rgb[1], rgb[2], _a(70 * p.bright * intensity * fade))
                 g.setColorAt(0.0, core)
-                g.setColorAt(0.35, mid)
+                g.setColorAt(0.45, mid)
                 g.setColorAt(1.0, QColor(0, 0, 0, 0))
                 painter.setBrush(g)
-                painter.drawEllipse(QPointF(sx, sy), pr * 2.8, pr * 2.8)
-            # Hot white pip at pulse head
-            bx, by, bz = self._bezier(p0, p1, p2, p.t)
-            sx, sy, depth = self._project(bx, by, bz, cx, cy, scale)
-            pip = (2.0 + 1.2 * p.bright) * (0.7 + 0.3 * depth) * p.width
-            painter.setBrush(QColor(255, 255, 255, _a(240 * p.bright)))
-            painter.drawEllipse(QPointF(sx, sy), pip, pip)
+                painter.drawEllipse(QPointF(sx, sy), pr * 1.8, pr * 1.8)
 
-        # —— Nodes back-to-front ——
-        order = sorted(range(len(nodes)), key=lambda i: proj[i][2])
-        for i in order:
-            n = nodes[i]
+        # —— Optional near-invisible junction pinpricks (NOT structural dots) ——
+        # Only a sparse subset of front cortex junctions, tiny + low alpha
+        painter.setPen(Qt.PenStyle.NoPen)
+        for i, n in enumerate(nodes):
+            if n.layer < 2:
+                continue
             sx, sy, depth = proj[i]
-            flash = n.flash
-            # Layer + depth sizing / brightness
-            layer_mul = 0.70 + 0.16 * n.layer
-            # Aggressive z-based size: back nodes shrink, front pop
-            r = (n.r * scale * 0.62 + 1.35) * (0.55 + 0.55 * depth) * layer_mul
-            r *= 1.0 + flash * (0.85 if speaking else 0.50)
-            # Occlusion haze for deep nodes
-            occl = 0.28 + 0.72 * depth
+            if depth < 0.55:
+                continue
+            # Sparse: hash-ish skip so not every junction glitters
+            if (i * 17 + 3) % 5 != 0:
+                continue
+            pr = 0.55 + 0.35 * depth
+            a = (18 + n.flash * 40) * intensity * depth
+            if a < 8:
+                continue
+            rad = _radial(n.x, n.y, n.z)
+            rgb = _filament_rgb(rad, lit=n.flash)
+            painter.setBrush(QColor(rgb[0], rgb[1], rgb[2], _a(a)))
+            painter.drawEllipse(QPointF(sx, sy), pr, pr)
 
-            hr = r * (3.2 + flash * 3.0)
-            hg = QRadialGradient(QPointF(sx, sy), hr)
-            ha = (36 + flash * 160) * intensity * occl
-            if speaking and flash > 0.4:
-                ha *= 1.25
-            hg.setColorAt(0.0, QColor(190, 248, 255, _a(ha)))
-            hg.setColorAt(0.40, QColor(100, 210, 235, _a(ha * 0.38)))
-            hg.setColorAt(1.0, QColor(0, 0, 0, 0))
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(hg)
-            painter.drawEllipse(QPointF(sx, sy), hr, hr)
-
-            core_a = (130 + flash * 140) * (0.55 + 0.45 * intensity) * occl
-            if flash > 0.18:
-                painter.setBrush(_q("#f2fdff", min(255, 220 * flash * intensity + 40)))
-            else:
-                # Deep nodes slightly cooler / dimmer
-                if n.layer == 0:
-                    painter.setBrush(QColor(70, 150, 185, _a(core_a * 0.75)))
-                else:
-                    painter.setBrush(QColor(105, 195, 225, _a(core_a)))
-            painter.drawEllipse(QPointF(sx, sy), r, r)
-
-            # Specular kiss on front cortex nodes
-            if depth > 0.55 and n.layer >= 1 and flash < 0.3:
-                painter.setBrush(QColor(220, 245, 255, _a(50 * depth * intensity)))
-                painter.drawEllipse(QPointF(sx - r * 0.25, sy - r * 0.28), r * 0.35, r * 0.28)
-
-            if flash > 0.30:
-                painter.setBrush(_q(C_CYAN_GLOW, 250 * flash))
-                painter.drawEllipse(QPointF(sx, sy), r * 0.48, r * 0.48)
-            if speaking and flash > 0.55:
-                painter.setBrush(QColor(255, 255, 255, _a(200 * flash)))
-                painter.drawEllipse(QPointF(sx, sy), r * 0.22, r * 0.22)
-
-        # Soft outer haze ring (keeps field from reading as hard cutout)
+        # Soft outer haze (no hard cutout)
         outer = QRadialGradient(QPointF(cx, cy), scale * 1.35)
         outer.setColorAt(0.0, QColor(0, 0, 0, 0))
         outer.setColorAt(0.72, QColor(0, 0, 0, 0))
-        outer.setColorAt(1.0, QColor(8, 18, 28, _a(30)))
+        outer.setColorAt(1.0, QColor(8, 18, 28, _a(28)))
         painter.setBrush(outer)
         painter.drawEllipse(QPointF(cx, cy), scale * 1.35, scale * 1.10)
 
