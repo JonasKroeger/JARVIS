@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-JARVIS desktop app — voice-first holographic orb HUD (PyQt6).
+JARVIS desktop app — voice-first soft-glow orb HUD (PyQt6).
 
 Hold the orb (or Space) to talk; release to send. Press / for a ghost text
-field. Replies prefer TTS with a fading caption — no boxy chat panel.
+field. Replies prefer TTS with a fading caption — quiet circle of light.
 
 Run from the JARVIS folder: python app.py
 """
@@ -26,7 +26,6 @@ from PyQt6.QtCore import Qt, QThread, QTimer, pyqtSignal
 from PyQt6.QtGui import QKeySequence, QShortcut
 from PyQt6.QtWidgets import (
     QApplication,
-    QLabel,
     QLineEdit,
     QMainWindow,
     QMessageBox,
@@ -203,13 +202,9 @@ class JarvisWindow(QMainWindow):
         self._orb.hold_ended.connect(self._mic_release)
         outer.addWidget(self._orb, stretch=1)
 
+        # Status is silent — orb brightness/pulse only (compat shim kept off-layout)
         self._ring_caption = StatusChip()
-        self._ring_caption.setText("ONLINE")
-        chip_row = QVBoxLayout()
-        chip_row.setContentsMargins(0, 6, 0, 2)
-        chip_row.setAlignment(Qt.AlignmentFlag.AlignHCenter)
-        chip_row.addWidget(self._ring_caption, alignment=Qt.AlignmentFlag.AlignHCenter)
-        outer.addLayout(chip_row)
+        self._ring_caption.hide()
 
         self._captions = CaptionStack()
         outer.addWidget(self._captions)
@@ -217,15 +212,10 @@ class JarvisWindow(QMainWindow):
         # Ghost text entry — hidden until /
         self._entry = QLineEdit()
         self._entry.setObjectName("ghostInput")
-        self._entry.setPlaceholderText("Command…  (Esc to dismiss)")
+        self._entry.setPlaceholderText("")
         self._entry.returnPressed.connect(self._send_text)
         self._entry.hide()
         outer.addWidget(self._entry)
-
-        hint = QLabel("HOLD ORB  ·  SPACE  ·  / TEXT")
-        hint.setObjectName("hintLabel")
-        hint.setAlignment(Qt.AlignmentFlag.AlignHCenter)
-        outer.addWidget(hint)
 
         self.setStyleSheet(HUD_STYLESHEET)
 

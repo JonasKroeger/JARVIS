@@ -1,18 +1,14 @@
-"""JARVIS HUD chrome — holographic orb visualizer, frameless title, captions."""
+"""JARVIS HUD — quiet soft-glow orb. Minimal chrome."""
 
 from __future__ import annotations
 
 import math
-import random
 
-from PyQt6.QtCore import QPoint, QPointF, QRectF, Qt, QTimer, pyqtSignal
+from PyQt6.QtCore import QPoint, QPointF, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import (
     QColor,
-    QFont,
-    QLinearGradient,
     QMouseEvent,
     QPainter,
-    QPainterPath,
     QPen,
     QRadialGradient,
 )
@@ -25,27 +21,15 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-# —— Palette (Stark cyan + soft gold on near-black) ——
-C_BG = "#020408"
-C_PANEL = "#05080e"
-C_BORDER = "#1a3048"
-C_BORDER_BRIGHT = "#2e5578"
-C_CYAN = "#3de0ff"
-C_CYAN_DIM = "#00d4ff"
-C_CYAN_SOFT = "#1a8aaa"
-C_CYAN_GLOW = "#7af0ff"
-C_GOLD = "#d4a84b"
-C_GOLD_SOFT = "#c9a227"
-C_AMBER = "#ffb84d"
+# —— Quiet palette ——
+C_BG = "#030508"
+C_CYAN = "#7ae8ff"
+C_CYAN_SOFT = "#4ec8e0"
+C_CYAN_GLOW = "#c8f6ff"
 C_TEXT = "#d8e6f0"
-C_MUTED = "#6a8498"
-C_USER = "#3de0ff"
-C_ASSIST = "#e8f0f8"
-C_DANGER = "#ff5a5a"
-C_SPEAK = "#c8e8f4"
+C_MUTED = "#5a7080"
 
 MONO = '"Menlo", "SF Mono", "Consolas", "Courier New", monospace'
-# Prefer system UI for captions — slightly more premium than pure mono
 UI_SANS = '"Helvetica Neue", "Avenir Next", ".AppleSystemUIFont", "Segoe UI", sans-serif'
 
 
@@ -77,11 +61,11 @@ QWidget#titleBar {{
     border: none;
 }}
 QLabel#wordmark {{
-    color: rgba(61, 224, 255, 85);
+    color: rgba(122, 232, 255, 45);
     font-family: {MONO};
-    font-size: 9px;
-    font-weight: 600;
-    letter-spacing: 10px;
+    font-size: 8px;
+    font-weight: 500;
+    letter-spacing: 8px;
 }}
 QPushButton#winClose, QPushButton#winMin {{
     background: transparent;
@@ -94,56 +78,53 @@ QPushButton#winClose, QPushButton#winMin {{
     padding: 0;
 }}
 QPushButton#winClose {{
-    background: rgba(255, 95, 87, 150);
+    background: rgba(255, 95, 87, 120);
 }}
 QPushButton#winClose:hover {{
     background: #ff7a73;
 }}
 QPushButton#winMin {{
-    background: rgba(254, 188, 46, 130);
+    background: rgba(254, 188, 46, 100);
 }}
 QPushButton#winMin:hover {{
     background: #ffd060;
 }}
 QLabel#ringCaption {{
-    color: {C_CYAN_SOFT};
+    color: rgba(90, 160, 180, 90);
     font-family: {MONO};
-    font-size: 10px;
-    letter-spacing: 6px;
-    font-weight: 600;
+    font-size: 9px;
+    letter-spacing: 4px;
+    font-weight: 500;
     background: transparent;
 }}
 QLabel#replyCaption {{
-    color: rgba(220, 232, 242, 210);
+    color: rgba(220, 232, 242, 200);
     font-family: {UI_SANS};
     font-size: 13px;
-    letter-spacing: 0.4px;
+    letter-spacing: 0.3px;
     font-weight: 400;
     background: transparent;
-    padding: 8px 28px;
+    padding: 6px 32px;
 }}
 QLabel#hintLabel {{
-    color: rgba(106, 132, 152, 110);
+    color: rgba(90, 112, 128, 0);
     font-family: {MONO};
-    font-size: 8px;
-    letter-spacing: 3.5px;
-    font-weight: 500;
+    font-size: 1px;
     background: transparent;
-    padding-top: 4px;
 }}
 QLineEdit#ghostInput {{
-    background: rgba(4, 10, 18, 185);
+    background: rgba(8, 14, 22, 140);
     color: {C_TEXT};
-    border: 1px solid rgba(61, 224, 255, 70);
-    border-radius: 18px;
-    padding: 11px 18px;
+    border: 1px solid rgba(122, 232, 255, 35);
+    border-radius: 16px;
+    padding: 10px 16px;
     selection-background-color: #1a3a50;
     font-family: {UI_SANS};
     font-size: 13px;
 }}
 QLineEdit#ghostInput:focus {{
-    border: 1px solid rgba(61, 224, 255, 160);
-    background: rgba(6, 14, 24, 210);
+    border: 1px solid rgba(122, 232, 255, 90);
+    background: rgba(10, 18, 28, 170);
 }}
 QMessageBox {{
     background: {C_BG};
@@ -155,7 +136,7 @@ QMessageBox QLabel {{
 QMessageBox QPushButton {{
     background: #0c1522;
     color: {C_CYAN};
-    border: 1px solid {C_CYAN_DIM};
+    border: 1px solid rgba(122, 232, 255, 80);
     border-radius: 10px;
     padding: 6px 16px;
     font-family: {MONO};
@@ -164,7 +145,7 @@ QMessageBox QPushButton {{
 
 
 class HudRoot(QWidget):
-    """Near-black canvas with soft vignette + corner chrome — orb lives on top."""
+    """Near-black canvas — soft vignette only, no chrome."""
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -177,52 +158,19 @@ class HudRoot(QWidget):
         w, h = self.width(), self.height()
         painter.fillRect(0, 0, w, h, QColor(C_BG))
 
-        # Soft center haze (holo field)
-        haze = QRadialGradient(QPointF(w / 2.0, h * 0.42), max(w, h) * 0.55)
-        haze.setColorAt(0.0, QColor(8, 28, 42, 55))
-        haze.setColorAt(0.45, QColor(4, 14, 24, 18))
+        # Very soft center haze so the orb feels seated in light
+        haze = QRadialGradient(QPointF(w / 2.0, h * 0.42), max(w, h) * 0.5)
+        haze.setColorAt(0.0, QColor(10, 30, 42, 28))
+        haze.setColorAt(0.5, QColor(4, 12, 20, 8))
         haze.setColorAt(1.0, QColor(0, 0, 0, 0))
         painter.fillRect(0, 0, w, h, haze)
 
-        # Soft vignette
-        vig = QRadialGradient(QPointF(w / 2.0, h / 2.0), max(w, h) * 0.78)
+        # Soft edge vignette
+        vig = QRadialGradient(QPointF(w / 2.0, h / 2.0), max(w, h) * 0.82)
         vig.setColorAt(0.0, QColor(0, 0, 0, 0))
-        vig.setColorAt(0.62, QColor(0, 0, 0, 0))
-        vig.setColorAt(1.0, QColor(0, 0, 0, 200))
+        vig.setColorAt(0.7, QColor(0, 0, 0, 0))
+        vig.setColorAt(1.0, QColor(0, 0, 0, 160))
         painter.fillRect(0, 0, w, h, vig)
-
-        # Corner brackets (Stark HUD chrome) instead of a full boxy frame
-        m = 10.0
-        L = 22.0
-        painter.setPen(QPen(QColor(61, 224, 255, 55), 1.15))
-        # TL
-        painter.drawLine(QPointF(m, m + L), QPointF(m, m))
-        painter.drawLine(QPointF(m, m), QPointF(m + L, m))
-        # TR
-        painter.drawLine(QPointF(w - m - L, m), QPointF(w - m, m))
-        painter.drawLine(QPointF(w - m, m), QPointF(w - m, m + L))
-        # BL
-        painter.drawLine(QPointF(m, h - m - L), QPointF(m, h - m))
-        painter.drawLine(QPointF(m, h - m), QPointF(m + L, h - m))
-        # BR
-        painter.drawLine(QPointF(w - m - L, h - m), QPointF(w - m, h - m))
-        painter.drawLine(QPointF(w - m, h - m), QPointF(w - m, h - m - L))
-
-        # Tiny gold accent ticks on top corners
-        painter.setPen(QPen(QColor(212, 168, 75, 70), 1.0))
-        painter.drawLine(QPointF(m + 4, m + 4), QPointF(m + 10, m + 4))
-        painter.drawLine(QPointF(w - m - 10, m + 4), QPointF(w - m - 4, m + 4))
-
-        # Restrained holographic scanlines (Stark glass, not CRT noise)
-        painter.setPen(Qt.PenStyle.NoPen)
-        for y in range(0, h, 3):
-            a = 7 if (y // 3) % 2 == 0 else 3
-            painter.fillRect(0, y, w, 1, QColor(61, 224, 255, a))
-
-        # Faint gold baseline under the field
-        painter.setPen(QPen(QColor(212, 168, 75, 28), 1.0))
-        painter.drawLine(QPointF(m + L + 8, h - m), QPointF(w - m - L - 8, h - m))
-
         painter.end()
 
 
@@ -284,65 +232,33 @@ class TitleBar(QWidget):
 
 
 class StatusStrip(QWidget):
-    """Compat shim — thin status label (kept for older imports)."""
+    """Compat shim — unused in minimal HUD."""
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.setFixedHeight(22)
-        lay = QHBoxLayout(self)
-        lay.setContentsMargins(0, 0, 0, 0)
-        self._label = QLabel("SYS // STANDBY")
-        self._label.setObjectName("ringCaption")
-        lay.addWidget(self._label)
+        self.setFixedHeight(0)
+        self.hide()
+        self._label = QLabel("")
 
-    def setText(self, text: str) -> None:  # noqa: N802
-        self._label.setText(text)
+    def setText(self, text: str) -> None:  # noqa: N802, ARG002
+        pass
 
     def text(self) -> str:
-        return self._label.text()
+        return ""
 
 
 class StatusChip(QWidget):
-    """Soft holographic status pill under the orb (ONLINE / LISTENING / …)."""
+    """Compat shim — status is silent (orb brightness only)."""
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.setFixedHeight(34)
-        self.setMinimumWidth(120)
-        self._text = "ONLINE"
-        self._phase = 0.0
-        self._active = False  # listening / thinking / speaking
-        self._danger = False
-        self._timer = QTimer(self)
-        self._timer.timeout.connect(self._tick)
-        self._timer.start(40)
+        self.setFixedHeight(0)
+        self.setMaximumHeight(0)
+        self.hide()
+        self._text = ""
 
     def setText(self, text: str) -> None:  # noqa: N802
-        t = (text or "").strip().upper() or "STANDBY"
-        if t == self._text:
-            return
-        self._text = t
-        lower = t.lower()
-        self._active = any(
-            k in lower
-            for k in (
-                "listen",
-                "think",
-                "comput",
-                "speak",
-                "synth",
-                "formulat",
-                "transcrib",
-                "process",
-                "contact",
-                "relay",
-                "boot",
-                "initializ",
-            )
-        )
-        self._danger = "error" in lower or "fault" in lower or "unclear" in lower
-        self.update()
-        self.updateGeometry()
+        self._text = (text or "").strip()
 
     def text(self) -> str:
         return self._text
@@ -350,122 +266,22 @@ class StatusChip(QWidget):
     def sizeHint(self):  # noqa: N802
         from PyQt6.QtCore import QSize
 
-        # Width tracks label length with generous padding
-        return QSize(max(140, 28 + len(self._text) * 10), 34)
-
-    def _tick(self) -> None:
-        self._phase = (self._phase + (0.08 if self._active else 0.03)) % (math.pi * 2)
-        if self._active or self._danger:
-            self.update()
+        return QSize(0, 0)
 
     def paintEvent(self, event) -> None:  # noqa: N802, ARG002
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        painter.setRenderHint(QPainter.RenderHint.TextAntialiasing)
-
-        w, h = self.width(), self.height()
-        # Measure text
-        font = QFont()
-        font.setFamilies(["Menlo", "SF Mono", "Consolas", "Courier New"])
-        font.setPixelSize(10)
-        font.setWeight(QFont.Weight.DemiBold)
-        font.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 3.2)
-        painter.setFont(font)
-        fm = painter.fontMetrics()
-        tw = fm.horizontalAdvance(self._text)
-        pad_x = 18.0
-        pad_y = 6.0
-        chip_w = tw + pad_x * 2
-        chip_h = fm.height() + pad_y * 2
-        chip_w = min(chip_w, w - 4)
-        cx = w / 2.0
-        cy = h / 2.0
-        rect = QRectF(cx - chip_w / 2.0, cy - chip_h / 2.0, chip_w, chip_h)
-        radius = chip_h / 2.0
-
-        pulse = 0.55 + 0.45 * (0.5 + 0.5 * math.sin(self._phase))
-        if self._danger:
-            base = QColor(255, 90, 90)
-            glow_a = 50 + int(40 * pulse)
-        elif self._active:
-            base = QColor(61, 224, 255)
-            glow_a = 40 + int(50 * pulse)
-        else:
-            base = QColor(45, 190, 220)
-            glow_a = 22
-
-        # Soft outer glow
-        glow = QRadialGradient(QPointF(cx, cy), chip_w * 0.7)
-        g0 = QColor(base)
-        g0.setAlpha(_a(glow_a))
-        glow.setColorAt(0.0, g0)
-        glow.setColorAt(1.0, QColor(0, 0, 0, 0))
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(glow)
-        painter.drawEllipse(QPointF(cx, cy), chip_w * 0.55, chip_h * 1.4)
-
-        # Glass fill
-        fill = QLinearGradient(rect.topLeft(), rect.bottomLeft())
-        fill.setColorAt(0.0, QColor(10, 24, 36, 190))
-        fill.setColorAt(0.5, QColor(6, 14, 24, 170))
-        fill.setColorAt(1.0, QColor(4, 10, 18, 200))
-        path = QPainterPath()
-        path.addRoundedRect(rect, radius, radius)
-        painter.setBrush(fill)
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.drawPath(path)
-
-        # Specular top edge
-        spec = QLinearGradient(rect.topLeft(), QPointF(rect.left(), rect.top() + chip_h * 0.45))
-        spec.setColorAt(0.0, QColor(180, 230, 255, 28))
-        spec.setColorAt(1.0, QColor(180, 230, 255, 0))
-        painter.setBrush(spec)
-        painter.drawPath(path)
-
-        # Border
-        border = QColor(base)
-        border.setAlpha(_a(90 + (70 * pulse if self._active else 25)))
-        painter.setBrush(Qt.BrushStyle.NoBrush)
-        painter.setPen(QPen(border, 1.05))
-        painter.drawPath(path)
-
-        # Inner hairline
-        inner = rect.adjusted(1.5, 1.5, -1.5, -1.5)
-        painter.setPen(QPen(QColor(61, 224, 255, 18), 0.8))
-        painter.drawRoundedRect(inner, radius - 1.5, radius - 1.5)
-
-        # Tiny gold pip on left when active
-        if self._active and not self._danger:
-            pip = QColor(C_GOLD)
-            pip.setAlpha(_a(140 + 80 * pulse))
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(pip)
-            painter.drawEllipse(QPointF(rect.left() + 9.0, cy), 2.0, 2.0)
-
-        # Label
-        tc = QColor(base)
-        if self._danger:
-            tc = QColor(255, 140, 140)
-        elif self._active:
-            tc = QColor(180, 240, 255)
-        else:
-            tc = QColor(90, 180, 200)
-        tc.setAlpha(230 if self._active or self._danger else 175)
-        painter.setPen(tc)
-        painter.drawText(rect, int(Qt.AlignmentFlag.AlignCenter), self._text)
-        painter.end()
+        pass
 
 
 class CaptionStack(QWidget):
-    """Fading reply caption under the orb — not a scrolling chat box."""
+    """Fading reply caption under the orb — soft text only, no frame."""
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.setMinimumHeight(52)
-        self.setMaximumHeight(110)
+        self.setMinimumHeight(48)
+        self.setMaximumHeight(100)
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(28, 2, 28, 0)
-        lay.setSpacing(4)
+        lay.setContentsMargins(36, 2, 36, 0)
+        lay.setSpacing(0)
         self._caption = QLabel("")
         self._caption.setObjectName("replyCaption")
         self._caption.setAlignment(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop)
@@ -498,7 +314,7 @@ class CaptionStack(QWidget):
         if not text:
             return
         display = text if len(text) <= 160 else text[:157].rstrip() + "…"
-        self._caption.setText(f"›  {display}")
+        self._caption.setText(display)
         self._is_user = True
         self._opacity = 1.0
         self._apply_opacity()
@@ -509,26 +325,26 @@ class CaptionStack(QWidget):
             self._fade_timer.start(70)
 
     def _fade_tick(self) -> None:
-        self._opacity = max(0.14, self._opacity - 0.022)
+        self._opacity = max(0.12, self._opacity - 0.022)
         self._apply_opacity()
-        if self._opacity <= 0.14:
+        if self._opacity <= 0.12:
             self._fade_timer.stop()
 
     def _apply_opacity(self) -> None:
-        a = int(210 * self._opacity)
+        a = int(200 * self._opacity)
         if self._is_user:
-            color = f"rgba(61, 224, 255, {a})"
+            color = f"rgba(122, 232, 255, {a})"
         else:
             color = f"rgba(220, 232, 242, {a})"
         self._caption.setStyleSheet(
             f"QLabel#replyCaption {{ color: {color}; "
-            f"font-family: {UI_SANS}; font-size: 13px; letter-spacing: 0.4px; "
-            f"font-weight: 400; background: transparent; padding: 8px 28px; }}"
+            f"font-family: {UI_SANS}; font-size: 13px; letter-spacing: 0.3px; "
+            f"font-weight: 400; background: transparent; padding: 6px 32px; }}"
         )
 
 
 class OrbVisualizer(QWidget):
-    """Iron-Man holographic orb: glass core, arc rings, restrained particle field.
+    """Quiet circle of light — soft cyan/white glow. State = brightness/pulse only.
 
     Hold-click (or Space from parent) drives listening. States:
     idle / listening / thinking / speaking.
@@ -544,44 +360,19 @@ class OrbVisualizer(QWidget):
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.setMinimumSize(360, 360)
+        self.setMinimumSize(320, 320)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.setToolTip("Hold to speak · release to transmit")
+        self.setToolTip("Hold to speak")
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
         self._state = self.IDLE
         self._phase = 0.0
-        self._wave = 0.0
-        self._rot = 0.0
-        self._sweep = 0.0
         self._holding = False
-        self._rng = random.Random(42)
-
-        # Ambient starfield — fewer, softer (elegant, not noisy)
-        self._stars = [
-            (
-                self._rng.random(),
-                self._rng.random(),
-                0.35 + self._rng.random() * 1.4,
-                self._rng.random() * math.pi * 2,
-            )
-            for _ in range(56)
-        ]
-        # Soft bokeh dots
-        self._bokeh = [
-            (
-                self._rng.random(),
-                self._rng.random(),
-                4.0 + self._rng.random() * 9.0,
-                self._rng.random() * math.pi * 2,
-            )
-            for _ in range(10)
-        ]
 
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._tick)
-        self._timer.start(33)  # ~30 fps
+        self._timer.start(40)  # ~25 fps — enough for soft pulse
 
     def set_state(self, state: str) -> None:
         self._state = state or self.IDLE
@@ -589,64 +380,32 @@ class OrbVisualizer(QWidget):
 
     def _tick(self) -> None:
         speed = {
-            self.IDLE: 0.028,
-            self.LISTENING: 0.075,
-            self.THINKING: 0.14,
-            self.SPEAKING: 0.095,
-        }.get(self._state, 0.028)
-        wave_speed = {
-            self.IDLE: 0.038,
-            self.LISTENING: 0.08,
-            self.THINKING: 0.12,
-            self.SPEAKING: 0.09,
-        }.get(self._state, 0.038)
-        rot_speed = {
-            self.IDLE: 0.28,
-            self.LISTENING: 0.7,
-            self.THINKING: 1.55,
-            self.SPEAKING: 0.95,
-        }.get(self._state, 0.28)
-        sweep_speed = {
-            self.IDLE: 0.85,
-            self.LISTENING: 2.2,
-            self.THINKING: 4.0,
-            self.SPEAKING: 2.8,
-        }.get(self._state, 0.85)
+            self.IDLE: 0.022,
+            self.LISTENING: 0.055,
+            self.THINKING: 0.09,
+            self.SPEAKING: 0.07,
+        }.get(self._state, 0.022)
         self._phase = (self._phase + speed) % (math.pi * 2)
-        self._wave = (self._wave + wave_speed) % (math.pi * 2)
-        self._rot = (self._rot + rot_speed) % 360.0
-        self._sweep = (self._sweep + sweep_speed) % 360.0
         self.update()
 
-    def _palette(self) -> tuple[QColor, QColor, QColor, float]:
-        """primary, accent, gold, intensity."""
+    def _intensity(self) -> float:
+        """Base brightness multiplier by state."""
         if self._state == self.LISTENING:
-            return (
-                QColor(90, 235, 255),
-                QColor(255, 196, 90),
-                QColor(212, 168, 75),
-                1.18,
-            )
+            return 1.25
         if self._state == self.THINKING:
-            return (
-                QColor(110, 242, 255),
-                QColor(140, 245, 255),
-                QColor(200, 180, 100),
-                1.28,
-            )
+            return 1.15
         if self._state == self.SPEAKING:
-            return (
-                QColor(200, 236, 248),
-                QColor(122, 240, 255),
-                QColor(180, 200, 160),
-                1.12,
-            )
-        return (
-            QColor(55, 205, 235),
-            QColor(20, 170, 210),
-            QColor(200, 155, 70),
-            0.82,
-        )
+            return 1.2
+        return 0.78
+
+    def _pulse(self) -> float:
+        if self._state == self.THINKING:
+            return 0.82 + 0.18 * abs(math.sin(self._phase * 1.6))
+        if self._state == self.SPEAKING:
+            return 0.75 + 0.25 * abs(math.sin(self._phase * 2.2))
+        if self._state == self.LISTENING:
+            return 0.88 + 0.12 * abs(math.sin(self._phase * 1.1))
+        return 0.7 + 0.3 * (0.5 + 0.5 * math.sin(self._phase))
 
     # —— Interaction ——
     def mousePressEvent(self, event: QMouseEvent) -> None:  # noqa: N802
@@ -688,331 +447,87 @@ class OrbVisualizer(QWidget):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         w, h = self.width(), self.height()
         cx, cy = w / 2.0, h / 2.0
-        radius = min(w, h) * 0.33
+        radius = min(w, h) * 0.28
 
-        primary, accent, gold, intensity = self._palette()
-        pulse = 0.62 + 0.38 * (0.5 + 0.5 * math.sin(self._phase))
-        if self._state == self.THINKING:
-            pulse = 0.78 + 0.22 * abs(math.sin(self._phase * 1.7))
-        elif self._state == self.SPEAKING:
-            pulse = 0.68 + 0.32 * abs(math.sin(self._phase * 2.4))
-        elif self._state == self.LISTENING:
-            pulse = 0.82 + 0.18 * abs(math.sin(self._phase * 1.2))
-        alpha_scale = min(1.0, float(intensity) * float(pulse))
+        intensity = self._intensity()
+        pulse = self._pulse()
+        scale = min(1.35, intensity * pulse)
 
-        # —— Starfield (restrained) ——
+        # Soft outer blooms — quiet circle of light
         painter.setPen(Qt.PenStyle.NoPen)
-        for sx, sy, sz, sph in self._stars:
-            tw = 0.4 + 0.6 * (0.5 + 0.5 * math.sin(self._phase * 1.1 + sph))
-            a = _a(18 + 70 * tw * (0.5 + 0.5 * intensity))
-            c = QColor(primary)
-            c.setAlpha(max(6, min(140, a)))
-            painter.setBrush(c)
-            painter.drawEllipse(QPointF(sx * w, sy * h), sz * tw, sz * tw)
-
-        for bx, by, br, bph in self._bokeh:
-            tw = 0.5 + 0.5 * (0.5 + 0.5 * math.sin(self._wave + bph))
-            a = _a(8 + 16 * tw * intensity)
-            c = QColor(primary)
-            c.setAlpha(a)
-            painter.setBrush(c)
-            painter.drawEllipse(QPointF(bx * w, by * h), br * tw, br * tw)
-
-        # —— Multi-layer outer bloom ——
         for bloom_r, bloom_a in (
-            (radius * 2.15, 28),
-            (radius * 1.75, 42),
+            (radius * 2.4, 18),
+            (radius * 1.9, 32),
             (radius * 1.45, 55),
+            (radius * 1.1, 90),
         ):
             glow = QRadialGradient(QPointF(cx, cy), bloom_r)
-            c0 = QColor(primary)
-            c0.setAlpha(_a(bloom_a * alpha_scale))
-            c1 = QColor(primary)
-            c1.setAlpha(_a(bloom_a * 0.25 * alpha_scale))
+            c0 = QColor(122, 232, 255)
+            c0.setAlpha(_a(bloom_a * scale))
+            c1 = QColor(122, 232, 255)
+            c1.setAlpha(_a(bloom_a * 0.2 * scale))
             glow.setColorAt(0.0, c0)
-            glow.setColorAt(0.5, c1)
+            glow.setColorAt(0.55, c1)
             glow.setColorAt(1.0, QColor(0, 0, 0, 0))
             painter.setBrush(glow)
             painter.drawEllipse(QPointF(cx, cy), bloom_r, bloom_r)
 
-        # —— Thin chrome orbital rings (dashed / arc segments) ——
-        self._draw_chrome_rings(painter, cx, cy, radius, primary, gold, alpha_scale)
-
-        # —— Sweep / scan arc (elegant, not noisy) ——
-        self._draw_sweep(painter, cx, cy, radius, primary, gold, alpha_scale)
-
-        # —— Restrained wavy particle rings ——
-        ring_specs = (
-            # (base_r_frac, dots, amp_frac, freq, phase_off, size, alpha_base, spin)
-            (1.22, 120, 0.040, 4.5, 0.0, 1.45, 145, 0.30),
-            (1.05, 96, 0.032, 3.8, 1.3, 1.25, 125, -0.50),
-            (0.88, 78, 0.026, 3.2, 2.0, 1.1, 105, 0.75),
-            (0.72, 60, 0.020, 2.6, 0.8, 0.95, 90, -0.95),
-        )
-        energy = {
-            self.LISTENING: 1.30,
-            self.THINKING: 1.48,
-            self.SPEAKING: 1.22,
-        }.get(self._state, 1.0)
-
-        for i, (r_frac, dots, amp, freq, ph_off, sz, base_a, spin) in enumerate(ring_specs):
-            base_r = radius * r_frac * (0.98 + 0.02 * math.sin(self._phase + i))
-            rot = math.radians(self._rot * spin)
-            for d in range(dots):
-                t = (d / dots) * math.pi * 2.0 + rot
-                wave = (
-                    math.sin(t * freq + self._wave + ph_off)
-                    + 0.4 * math.sin(t * (freq + 1.4) - self._wave * 1.2 + i)
-                    + 0.15 * math.sin(t * 2.0 + self._phase)
-                )
-                rr = base_r * (1.0 + amp * energy * wave)
-                px = cx + math.cos(t) * rr
-                py = cy + math.sin(t) * rr
-                bright = 0.5 + 0.5 * (0.5 + 0.5 * math.sin(t * 3 + self._phase + i))
-                a = _a(base_a * alpha_scale * bright * (0.78 + 0.22 * pulse))
-                # Alternate cyan / gold on outer ring when listening
-                if i == 0 and self._state == self.LISTENING and d % 7 == 0:
-                    col = QColor(gold)
-                else:
-                    col = QColor(primary if i % 2 == 0 else accent)
-                col.setAlpha(max(8, min(255, a)))
-                painter.setBrush(col)
-                painter.setPen(Qt.PenStyle.NoPen)
-                ds = sz * (0.85 + 0.28 * bright) * (0.92 + 0.12 * energy)
-                painter.drawEllipse(QPointF(px, py), ds, ds)
-
-        # —— Glass core (Arc Reactor feel) ——
-        core_r = radius * 0.36 * (0.97 + 0.03 * pulse)
-
-        # Soft glass disc
-        glass = QRadialGradient(QPointF(cx - core_r * 0.15, cy - core_r * 0.2), core_r * 1.2)
-        glass.setColorAt(0.0, QColor(40, 90, 120, _a(90 * intensity)))
-        glass.setColorAt(0.35, QColor(8, 22, 36, _a(200)))
-        glass.setColorAt(0.75, QColor(4, 12, 22, _a(230)))
-        glass.setColorAt(1.0, QColor(primary.red(), primary.green(), primary.blue(), _a(55 * alpha_scale)))
+        # Soft glass body
+        body_r = radius * 0.72
+        glass = QRadialGradient(QPointF(cx - body_r * 0.12, cy - body_r * 0.18), body_r * 1.15)
+        glass.setColorAt(0.0, QColor(180, 240, 255, _a(55 * scale)))
+        glass.setColorAt(0.25, QColor(40, 100, 130, _a(70 * scale)))
+        glass.setColorAt(0.55, QColor(8, 24, 36, _a(160)))
+        glass.setColorAt(0.85, QColor(4, 12, 20, _a(200)))
+        glass.setColorAt(1.0, QColor(122, 232, 255, _a(40 * scale)))
         painter.setBrush(glass)
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.drawEllipse(QPointF(cx, cy), core_r, core_r)
+        painter.drawEllipse(QPointF(cx, cy), body_r, body_r)
 
-        # Specular highlight crescent
+        # Specular highlight — one soft crescent
         spec = QRadialGradient(
-            QPointF(cx - core_r * 0.28, cy - core_r * 0.32),
-            core_r * 0.55,
+            QPointF(cx - body_r * 0.25, cy - body_r * 0.3),
+            body_r * 0.5,
         )
-        spec.setColorAt(0.0, QColor(200, 240, 255, _a(55 * alpha_scale)))
-        spec.setColorAt(0.55, QColor(120, 200, 230, _a(12)))
+        spec.setColorAt(0.0, QColor(220, 248, 255, _a(50 * scale)))
+        spec.setColorAt(0.5, QColor(140, 210, 235, _a(12)))
         spec.setColorAt(1.0, QColor(0, 0, 0, 0))
         painter.setBrush(spec)
-        painter.drawEllipse(QPointF(cx, cy), core_r * 0.92, core_r * 0.92)
+        painter.drawEllipse(QPointF(cx, cy), body_r * 0.9, body_r * 0.9)
 
-        # Hex mesh (lighter, finer)
-        ha = QColor(primary)
-        ha.setAlpha(_a(95 * alpha_scale))
-        painter.setPen(QPen(ha, 0.9))
+        # Very faint rim hairline (almost invisible idle)
+        rim_a = _a((35 if self._state == self.IDLE else 70) * scale)
         painter.setBrush(Qt.BrushStyle.NoBrush)
-        for ring_i in range(1, 4):
-            hr = core_r * (ring_i / 3.6)
-            pts = []
-            for s in range(6):
-                ang = math.radians(60 * s - 90 + self._rot * 0.06)
-                rr = hr * (1.0 + 0.012 * math.sin(self._phase + s))
-                pts.append(QPointF(cx + math.cos(ang) * rr, cy + math.sin(ang) * rr))
-            for s in range(6):
-                painter.drawLine(pts[s], pts[(s + 1) % 6])
-            if ring_i >= 2:
-                for s in range(6):
-                    ang = math.radians(60 * s - 90 + self._rot * 0.06)
-                    painter.drawLine(
-                        QPointF(cx, cy),
-                        QPointF(cx + math.cos(ang) * hr, cy + math.sin(ang) * hr),
-                    )
+        painter.setPen(QPen(_q(C_CYAN, rim_a), 1.0))
+        painter.drawEllipse(QPointF(cx, cy), body_r, body_r)
 
-        # Fine hex cells
-        cell = core_r * 0.24
-        fine = QColor(primary)
-        fine.setAlpha(_a(40 * alpha_scale))
-        painter.setPen(QPen(fine, 0.65))
-        for row in range(-2, 3):
-            for col in range(-2, 3):
-                ox = col * cell * 1.5
-                oy = row * cell * math.sqrt(3)
-                if col % 2:
-                    oy += cell * math.sqrt(3) / 2
-                if ox * ox + oy * oy > (core_r * 0.78) ** 2:
-                    continue
-                self._draw_hex(painter, cx + ox, cy + oy, cell * 0.38)
-
-        # Core rim — dual stroke (cyan + soft gold tick)
-        rim = QColor(primary)
-        rim.setAlpha(_a(220 * alpha_scale))
-        painter.setPen(QPen(rim, 1.85))
-        painter.setBrush(Qt.BrushStyle.NoBrush)
-        painter.drawEllipse(QPointF(cx, cy), core_r, core_r)
-        # Outer hairline
-        rim2 = QColor(primary)
-        rim2.setAlpha(_a(70 * alpha_scale))
-        painter.setPen(QPen(rim2, 0.85))
-        painter.drawEllipse(QPointF(cx, cy), core_r + 3.5, core_r + 3.5)
-
-        # Concentric arc-reactor energy rings (restrained)
-        for frac, wa, width in (
-            (0.72, 55, 1.1),
-            (0.48, 80, 1.35),
-            (0.28, 110, 1.6),
-        ):
-            er = core_r * frac * (0.98 + 0.02 * pulse)
-            ec = QColor(primary)
-            ec.setAlpha(_a(wa * alpha_scale))
-            painter.setPen(QPen(ec, width))
-            painter.setBrush(Qt.BrushStyle.NoBrush)
-            painter.drawEllipse(QPointF(cx, cy), er, er)
-
-        # Rotating gold reactor chevrons (always on, stronger when listening)
-        tick_a = _a((155 if self._state == self.LISTENING else 70) * alpha_scale)
-        painter.setPen(QPen(_q(C_GOLD, tick_a), 1.45))
-        for s in range(6):
-            ang = math.radians(60 * s - 90 + self._rot * 0.08)
-            r0 = core_r + 1.0
-            r1 = core_r + (7.5 if self._state == self.LISTENING else 5.2)
-            painter.drawLine(
-                QPointF(cx + math.cos(ang) * r0, cy + math.sin(ang) * r0),
-                QPointF(cx + math.cos(ang) * r1, cy + math.sin(ang) * r1),
-            )
-
-        # Inner bright pip (reactor core) — hotter glow
-        pip_r = 3.0 + 1.8 * pulse
-        pip_glow = QRadialGradient(QPointF(cx, cy), pip_r * 3.8)
+        # Hot soft core pip
+        pip_r = 4.5 + 2.0 * pulse
+        pip_glow = QRadialGradient(QPointF(cx, cy), pip_r * 4.5)
         pg = QColor(C_CYAN_GLOW)
-        pg.setAlpha(_a(210 * alpha_scale))
+        pg.setAlpha(_a(200 * scale))
         pip_glow.setColorAt(0.0, pg)
-        pip_glow.setColorAt(0.35, QColor(122, 240, 255, _a(110 * alpha_scale)))
-        pip_glow.setColorAt(0.7, QColor(61, 224, 255, _a(35 * alpha_scale)))
+        pip_glow.setColorAt(0.3, QColor(200, 246, 255, _a(120 * scale)))
+        pip_glow.setColorAt(0.65, QColor(122, 232, 255, _a(40 * scale)))
         pip_glow.setColorAt(1.0, QColor(0, 0, 0, 0))
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(pip_glow)
-        painter.drawEllipse(QPointF(cx, cy), pip_r * 3.4, pip_r * 3.4)
-        # Hot white-cyan core
-        painter.setBrush(_q("#e8fbff", 235 * alpha_scale))
-        painter.drawEllipse(QPointF(cx, cy), pip_r * 0.55, pip_r * 0.55)
-        painter.setBrush(_q(C_CYAN_GLOW, 230 * alpha_scale))
-        painter.drawEllipse(QPointF(cx, cy), pip_r, pip_r)
+        painter.drawEllipse(QPointF(cx, cy), pip_r * 4.0, pip_r * 4.0)
+
+        painter.setBrush(_q("#f0fcff", 240 * scale))
+        painter.drawEllipse(QPointF(cx, cy), pip_r * 0.45, pip_r * 0.45)
+        painter.setBrush(_q(C_CYAN_GLOW, 220 * scale))
+        painter.drawEllipse(QPointF(cx, cy), pip_r * 0.9, pip_r * 0.9)
 
         painter.end()
 
-    def _draw_chrome_rings(
-        self,
-        painter: QPainter,
-        cx: float,
-        cy: float,
-        radius: float,
-        primary: QColor,
-        gold: QColor,
-        alpha_scale: float,
-    ) -> None:
-        """Dashed / gapped orbital rings — Arc Reactor chrome."""
-        rings = (
-            # (r_frac, width, alpha, dash_on, dash_off, rot_sign, use_gold)
-            (1.42, 1.15, 70, 14.0, 8.0, 0.15, False),
-            (1.32, 0.85, 45, 6.0, 10.0, -0.22, True),
-            (0.55, 1.05, 90, 18.0, 6.0, 0.4, False),
-            (0.48, 0.75, 50, 4.0, 8.0, -0.55, False),
-        )
-        for r_frac, width, base_a, dash_on, dash_off, rot_sign, use_gold in rings:
-            r = radius * r_frac
-            col = QColor(gold if use_gold else primary)
-            col.setAlpha(_a(base_a * alpha_scale))
-            pen = QPen(col, width)
-            pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-            # Draw as arc segments instead of Qt dash (smoother on retina)
-            painter.setPen(pen)
-            painter.setBrush(Qt.BrushStyle.NoBrush)
-            rot = math.radians(self._rot * rot_sign)
-            # Approximate circumference for dash count
-            circ = 2 * math.pi * r
-            seg = dash_on
-            gap = dash_off
-            unit = seg + gap
-            n = max(8, int(circ / unit))
-            for i in range(n):
-                a0 = rot + (i * unit) / r
-                a1 = a0 + seg / r
-                # Convert to Qt arc degrees (Qt: 16ths of degree, 0=3 o'clock, CCW)
-                start_deg = -math.degrees(a0)
-                span_deg = -math.degrees(a1 - a0)
-                rect = QRectF(cx - r, cy - r, r * 2, r * 2)
-                painter.drawArc(rect, int(start_deg * 16), int(span_deg * 16))
 
-    def _draw_sweep(
-        self,
-        painter: QPainter,
-        cx: float,
-        cy: float,
-        radius: float,
-        primary: QColor,
-        gold: QColor,
-        alpha_scale: float,
-    ) -> None:
-        """Single soft rotating sweep wedge — restrained radar feel."""
-        if self._state == self.IDLE:
-            span = 32.0
-            r = radius * 1.30
-            a_mul = 0.48
-            col = primary
-        elif self._state == self.LISTENING:
-            span = 42.0
-            r = radius * 1.34
-            a_mul = 0.7
-            col = gold
-        elif self._state == self.THINKING:
-            span = 55.0
-            r = radius * 1.36
-            a_mul = 0.85
-            col = primary
-        else:  # speaking
-            span = 36.0
-            r = radius * 1.30
-            a_mul = 0.6
-            col = primary
-
-        ang = self._sweep
-        # Soft wedge via several arcs fading out
-        for i in range(6):
-            t = i / 5.0
-            a = _a((55 * (1.0 - t) * a_mul) * alpha_scale)
-            c = QColor(col)
-            c.setAlpha(a)
-            painter.setPen(QPen(c, 1.6 - t * 0.8))
-            painter.setBrush(Qt.BrushStyle.NoBrush)
-            start = -(ang - span * 0.15 + span * t)
-            span_i = span * (1.0 - t) * 0.35
-            rect = QRectF(cx - r, cy - r, r * 2, r * 2)
-            painter.drawArc(rect, int(start * 16), int(-span_i * 16))
-
-        # Leading tip pip
-        tip_ang = math.radians(ang)
-        tip = QPointF(cx + math.cos(tip_ang) * r, cy - math.sin(tip_ang) * r)
-        tip_c = QColor(col)
-        tip_c.setAlpha(_a(160 * a_mul * alpha_scale))
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(tip_c)
-        painter.drawEllipse(tip, 2.2, 2.2)
-
-    @staticmethod
-    def _draw_hex(painter: QPainter, cx: float, cy: float, r: float) -> None:
-        pts = []
-        for s in range(6):
-            ang = math.radians(60 * s - 30)
-            pts.append(QPointF(cx + math.cos(ang) * r, cy + math.sin(ang) * r))
-        for s in range(6):
-            painter.drawLine(pts[s], pts[(s + 1) % 6])
-
-
-# Back-compat alias so older imports keep working during transition
+# Back-compat alias
 PulseRing = OrbVisualizer
 
 
-# Kept for import compatibility; unused in orb-first UI
 class HoloPanel(QWidget):
+    """Compat shim."""
+
     def __init__(self, parent: QWidget | None = None, *, scanlines: bool = False) -> None:
         super().__init__(parent)
         self._scanlines = scanlines
@@ -1024,6 +539,8 @@ class HoloPanel(QWidget):
 
 
 class ChatStack(QWidget):
+    """Compat shim."""
+
     def __init__(self, chat_widget: QWidget, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         lay = QVBoxLayout(self)
