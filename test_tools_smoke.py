@@ -94,6 +94,10 @@ class ToolSmokeTests(unittest.TestCase):
             "stock_quote",
             "dark_mode",
             "daily_briefing",
+            "remember",
+            "recall",
+            "list_memories",
+            "forget",
         ):
             self.assertIn(expected, names)
 
@@ -455,6 +459,102 @@ class ToolSmokeTests(unittest.TestCase):
         self.assertFalse(jarvis.is_chitchat("good morning"))
         self.assertFalse(jarvis.is_chitchat("brief me"))
         self.assertFalse(jarvis.is_chitchat("status report"))
+
+
+
+class MemoryStoreTests(unittest.TestCase):
+    """CRUD + injection tests with an injectable MEMORY_PATH (tempfile)."""
+
+    def setUp(self) -> None:
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self._path = Path(self._tmpdir.name) / "memory.json"
+        self._prev = jarvis.memory_store.MEMORY_PATH
+        jarvis.memory_store.MEMORY_PATH = self._path
+
+    def tearDown(self) -> None:
+        jarvis.memory_store.MEMORY_PATH = self._prev
+        self._tmpdir.cleanup()
+
+    def test_remember_and_list(self) -> None:
+        data = json.loads(jarvis.tool_remember({"text": "Works in Helsinki", "tags": ["work"]}))
+        self.assertTrue(data["ok"])
+        self.assertFalse(data["updated"])
+        self.assertTrue(data["memory"]["id"].startswith("m_"))
+        self.assertEqual(data["memory"]["text"], "Works in Helsinki")
+        listed = json.loads(jarvis.tool_list_memories({"limit": 5}))
+        self.assertEqual(listed["count"], 1)
+        self.assertEqual(listed["memories"][0]["text"], "Works in Helsinki")
+        self.assertTrue(self._path.is_file())
+
+    def test_remember_upsert_exact_text(self) -> None:
+        first = json.loads(jarvis.tool_remember({"text": "Prefers tea"}))
+        mid = first["memory"]["id"]
+        second = json.loads(jarvis.tool_remember({"text": "Prefers tea", "tags": ["pref"]}))
+        self.assertTrue(second["updated"])
+        self.assertEqual(second["memory"]["id"], mid)
+        listed = json.loads(jarvis.tool_list_memories({}))
+        self.assertEqual(listed["count"], 1)
+
+    def test_remember_caps_text(self) -> None:
+        long = "x" * 600
+        data = json.loads(jarvis.tool_remember({"text": long}))
+        self.assertEqual(len(data["memory"]["text"]), jarvis.memory_store.MEMORY_TEXT_MAX)
+
+    def test_remember_requires_text(self) -> None:
+        data = json.loads(jarvis.tool_remember({"text": "  "}))
+        self.assertIn("error", data)
+
+    def test_recall_query_and_recent(self) -> None:
+        jarvis.tool_remember({"text": "Name is Jonas", "tags": ["identity"]})
+        jarvis.tool_remember({"text": "Lives in Helsinki", "tags": ["home"]})
+        hits = json.loads(jarvis.tool_recall({"query": "helsinki"}))
+        self.assertEqual(hits["count"], 1)
+        self.assertIn("Helsinki", hits["memories"][0]["text"])
+        tag_hits = json.loads(jarvis.tool_recall({"query": "identity"}))
+        self.assertEqual(tag_hits["count"], 1)
+        recent = json.loads(jarvis.tool_recall({}))
+        self.assertEqual(recent["count"], 2)
+
+    def test_forget_by_id_and_text(self) -> None:
+        a = json.loads(jarvis.tool_remember({"text": "Fact A"}))
+        b = json.loads(jarvis.tool_remember({"text": "Fact B"}))
+        gone = json.loads(jarvis.tool_forget({"id": a["memory"]["id"]}))
+        self.assertTrue(gone["ok"])
+        self.assertTrue(gone["found"])
+        miss = json.loads(jarvis.tool_forget({"id": "m_missing"}))
+        self.assertFalse(miss["ok"])
+        by_text = json.loads(jarvis.tool_forget({"text": "Fact B"}))
+        self.assertTrue(by_text["ok"])
+        listed = json.loads(jarvis.tool_list_memories({}))
+        self.assertEqual(listed["count"], 0)
+
+    def test_forget_requires_id_or_text(self) -> None:
+        data = json.loads(jarvis.tool_forget({}))
+        self.assertFalse(data["ok"])
+
+    def test_inject_memory_into_messages(self) -> None:
+        jarvis.tool_remember({"text": "User name is Jonas"})
+        msgs = [{"role": "system", "content": "You are JARVIS."}, {"role": "user", "content": "hi"}]
+        out = jarvis.memory_store.inject_memory_messages(msgs)
+        self.assertEqual(out[0]["role"], "system")
+        self.assertEqual(out[1]["role"], "system")
+        self.assertTrue(out[1]["content"].startswith("## Long-term memory"))
+        self.assertIn("Jonas", out[1]["content"])
+        # Refresh replaces same sticky slot
+        jarvis.tool_remember({"text": "Prefers dark mode"})
+        out2 = jarvis.memory_store.inject_memory_messages(out)
+        mem_msgs = [m for m in out2 if m.get("role") == "system" and str(m.get("content", "")).startswith("## Long-term memory")]
+        self.assertEqual(len(mem_msgs), 1)
+        self.assertIn("dark mode", mem_msgs[0]["content"])
+
+    def test_atomic_write_creates_dir(self) -> None:
+        nested = Path(self._tmpdir.name) / "sub" / "memory.json"
+        jarvis.memory_store.MEMORY_PATH = nested
+        jarvis.tool_remember({"text": "Nested path works"})
+        self.assertTrue(nested.is_file())
+        data = json.loads(nested.read_text())
+        self.assertEqual(len(data), 1)
+
 
 
 if __name__ == "__main__":

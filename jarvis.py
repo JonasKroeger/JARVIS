@@ -22,6 +22,8 @@ from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
 
+import memory as memory_store
+
 import httpx
 
 OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "http://127.0.0.1:11434").rstrip("/")
@@ -47,16 +49,22 @@ _TIMERS_LOCK = threading.Lock()
 SYSTEM_PROMPT = """You are JARVIS, a calm, precise local assistant. Be brief unless asked for detail;
 dry wit is fine, never cruel. Call tools for real actions/data — never invent timestamps, notes,
 clipboard, weather, GitHub, system status, search results, file contents, stock prices, calendar
-events, or command output.
+events, memories, or command output.
 
 Tools: time, notes, open_url, open_app, clipboard, get_weather, github_status, get_system_status,
 notify, create_reminder, music_control, take_screenshot, list_running_apps, read_file, web_search,
 calendar_events, volume_control, start_timer, list_timers, fetch_url, stock_quote, dark_mode,
-daily_briefing.
+daily_briefing, remember, recall, list_memories, forget.
+
+Long-term memory: each turn includes a "## Long-term memory" system note with known facts. Call
+remember when the user states lasting preferences/facts ("my name is", "I prefer", "remember that",
+projects, people, routines). Call recall to search memory when useful; list_memories / forget when
+asked. Never invent memories — only use the injected list and tool results.
 
 When the user says good morning / brief me / status report (or similar), call daily_briefing and
 narrate the structured result — do not invent the briefing. Pure hi/thanks chitchat → plain text,
-no tools. Only tool-call for actions or live data.
+no tools (memory is still injected so you can greet by name if known). Only tool-call for actions
+or live data.
 
 Answer factual/historical questions neutrally. Refuse only requests for harm, crime, or illegal/
 exploitative material."""
@@ -449,6 +457,77 @@ TOOLS: list[dict[str, Any]] = [
                         "type": "string",
                         "description": "City for weather (default Helsinki). Empty string skips weather.",
                     }
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "remember",
+            "description": "Store a lasting fact about the user (preferences, name, projects, people, routines). Upserts on exact text match.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "text": {
+                        "type": "string",
+                        "description": "Fact to remember (max ~500 chars).",
+                    },
+                    "tags": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Optional tags, e.g. [\"preference\", \"work\"].",
+                    },
+                },
+                "required": ["text"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "recall",
+            "description": "Search long-term memory. With query: case-insensitive match on text/tags (top 10). Without: most recent 15.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Optional substring to search for in memory text/tags.",
+                    }
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_memories",
+            "description": "List newest long-term memories first (default 20).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "limit": {
+                        "type": "integer",
+                        "description": "Max memories to return (default 20).",
+                    }
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "forget",
+            "description": "Delete a memory by id or by exact text match.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string", "description": "Memory id (e.g. m_abc123)."},
+                    "text": {"type": "string", "description": "Exact memory text to delete."},
                 },
                 "required": [],
             },
@@ -1865,6 +1944,37 @@ def tool_daily_briefing(args: dict[str, Any]) -> str:
 
 
 
+def tool_remember(args: dict[str, Any]) -> str:
+    text = args.get("text", "")
+    if not isinstance(text, str):
+        text = str(text) if text is not None else ""
+    tags = args.get("tags")
+    return json.dumps(memory_store.remember(text, tags if isinstance(tags, list) else tags))
+
+
+def tool_recall(args: dict[str, Any]) -> str:
+    query = args.get("query")
+    if query is not None and not isinstance(query, str):
+        query = str(query)
+    return json.dumps(memory_store.recall(query))
+
+
+def tool_list_memories(args: dict[str, Any]) -> str:
+    limit = args.get("limit", memory_store.LIST_DEFAULT_LIMIT)
+    return json.dumps(memory_store.list_memories(limit))
+
+
+def tool_forget(args: dict[str, Any]) -> str:
+    mid = args.get("id")
+    text = args.get("text")
+    if mid is not None and not isinstance(mid, str):
+        mid = str(mid)
+    if text is not None and not isinstance(text, str):
+        text = str(text)
+    return json.dumps(memory_store.forget(id=mid, text=text))
+
+
+
 TOOL_DISPATCH = {
     "get_current_time": tool_get_current_time,
     "list_notes": tool_list_notes,
@@ -1892,6 +2002,10 @@ TOOL_DISPATCH = {
     "stock_quote": tool_stock_quote,
     "dark_mode": tool_dark_mode,
     "daily_briefing": tool_daily_briefing,
+    "remember": tool_remember,
+    "recall": tool_recall,
+    "list_memories": tool_list_memories,
+    "forget": tool_forget,
 }
 
 
@@ -2046,18 +2160,22 @@ def run_turn(
 ) -> tuple[list[dict[str, Any]], str]:
     """Run tool rounds until assistant returns text or cap hit.
 
-    Short greetings/chitchat skip the tools schema for a faster single round-trip.
+    Short greetings/chitchat skip the tools schema for a faster single round-trip,
+    but long-term memory is still injected so greetings can use known facts (e.g. name).
     """
-    state = messages
+    # Refresh sticky memory system message before each model call path.
+    state = memory_store.inject_memory_messages(messages)
     last_text: str | None = None
     use_tools = True
-    for m in reversed(messages):
+    for m in reversed(state):
         if m.get("role") == "user":
             use_tools = not is_chitchat(str(m.get("content") or ""))
             break
 
     rounds = 1 if not use_tools else MAX_TOOL_ROUNDS
     for _ in range(rounds):
+        # Re-inject in case remember/forget ran in a prior tool round this turn.
+        state = memory_store.inject_memory_messages(state)
         state, text = chat_round(client, model, state, use_tools=use_tools)
         if text is not None:
             last_text = text
@@ -2075,6 +2193,7 @@ def main() -> None:
     print(f"JARVIS — model={model}  ollama={OLLAMA_HOST}")
     print("Commands: /exit /quit  |  /clear  |  /model <name>")
     print("Notes folder:", NOTES_DIR)
+    print("Memory file:", memory_store.MEMORY_PATH)
     print()
 
     messages: list[dict[str, Any]] = [{"role": "system", "content": SYSTEM_PROMPT}]

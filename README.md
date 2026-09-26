@@ -25,7 +25,7 @@ python app.py
 
 The window is a frameless **cinematic HUD** (default ~1180×740). Status strip uses `SYS // OLLAMA READY`, `SYS // SYNTHESIZING` (waiting on Ollama), `SYS // SPEAKING` (TTS playing), `SYS // LISTENING`. Left side is a multi-layer pulse/radar; right side stacks transcript + transmit bar. Telemetry shows `EL REQ // N` whenever TTS/`speak_async` is invoked. Startup fails fast if the model is missing (suggests `ollama pull …`).
 
-Short greetings/chitchat (≤40 chars) skip the tools schema for a faster single Ollama round-trip; real asks still get tools.
+Short greetings/chitchat (≤40 chars) skip the tools schema for a faster single Ollama round-trip (memory is still injected); real asks still get tools.
 
 ### CLI (secondary)
 
@@ -61,9 +61,11 @@ Do **not** commit API keys. If ElevenLabs fails for any reason, JARVIS falls bac
 
 Notes are stored under `~/.jarvis/notes/`.
 
+Long-term memory (preferences, people, projects, routines) lives in `~/.jarvis/memory.json` and is injected into each turn so JARVIS can greet you by name and recall facts across sessions. Say *Remember that I work in Helsinki*, *What do you know about me?*, or *Forget that*.
+
 ## Tools
 
-See [TOOLS.md](TOOLS.md) for the full tool list (time, notes, browser, apps, clipboard, weather, GitHub, system status, notify, reminders, music, screenshot, running apps, read_file, web search, plus premium: calendar, volume, timers, fetch_url, stocks, dark mode, and **daily_briefing**).
+See [TOOLS.md](TOOLS.md) for the full tool list (time, notes, browser, apps, clipboard, weather, GitHub, system status, notify, reminders, music, screenshot, running apps, read_file, web search, plus premium: calendar, volume, timers, fetch_url, stocks, dark mode, **daily_briefing**, and durable **memory** tools).
 
 Say *good morning*, *brief me*, or *status report* to get the Iron Man-style `daily_briefing` composite.
 

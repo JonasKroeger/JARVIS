@@ -30,6 +30,27 @@ All tools return JSON strings. The model must call tools rather than invent resu
 | `stock_quote` | `symbol` | Yahoo Finance chart API (no key); price, currency, change % |
 | `dark_mode` | `mode` on\|off\|toggle\|status | macOS System Events appearance preferences |
 | `daily_briefing` | optional `city` | Composite: time + system + calendar(today) + weather + github; default city Helsinki; empty city skips weather |
+| `remember` | `text`, optional `tags` | Upsert lasting fact into `~/.jarvis/memory.json` (exact text match); text capped ~500 chars |
+| `recall` | optional `query` | Search memory (case-insensitive on text/tags, top 10); no query → newest 15 |
+| `list_memories` | optional `limit` (default 20) | Newest memories first |
+| `forget` | `id` **or** `text` (exact) | Delete one memory; returns ok/not found |
+
+
+## Long-term memory
+
+Durable facts across sessions live in `~/.jarvis/memory.json` (same `~/.jarvis/` family as notes).
+Each user turn injects a compact `## Long-term memory` system note (up to ~12 newest facts) even
+for pure greetings, so JARVIS can greet by name if remembered. The model should call `remember`
+for lasting preferences — never invent memories.
+
+Example phrases:
+
+```text
+Remember that I work in Helsinki
+My name is Jonas — I prefer concise answers
+What do you know about me?
+Forget that
+```
 
 ## Safety
 
