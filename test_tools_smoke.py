@@ -491,12 +491,34 @@ class ToolSmokeTests(unittest.TestCase):
             "what do you remember about the project",
             "what's my clipboard",
             "open safari",
+            "what's the weather",
+            "set a timer for 5 minutes",
+            "search the web for rust",
+            "volume up",
+            "take a screenshot",
+            "good morning",
         ):
-            self.assertFalse(
-                jarvis.is_personal_memory_question(phrase),
-                msg=phrase,
-            )
             self.assertFalse(jarvis.should_skip_tools(phrase), msg=phrase)
+
+    def test_short_general_qa_skips_tools(self) -> None:
+        for phrase in (
+            "what is pi",
+            "what's pi",
+            "what is π",
+            "what's 2+2",
+            "who is Einstein",
+            "explain gravity briefly",
+            "tell me a joke",
+            "define photosynthesis",
+            "how does wifi work?",
+        ):
+            self.assertTrue(jarvis.is_short_general_qa(phrase), msg=phrase)
+            self.assertTrue(jarvis.should_skip_tools(phrase), msg=phrase)
+
+    def test_long_or_non_question_keeps_tools(self) -> None:
+        long_q = "what is pi " + ("x" * 130)
+        self.assertFalse(jarvis.is_short_general_qa(long_q))
+        self.assertFalse(jarvis.should_skip_tools(long_q))
 
 
 

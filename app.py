@@ -85,7 +85,7 @@ class JarvisWindow(QMainWindow):
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, False)
 
         self._client = httpx.Client()
-        self._model = os.environ.get("OLLAMA_MODEL", "llama3.1:8b")
+        self._model = os.environ.get("OLLAMA_MODEL", brain.DEFAULT_OLLAMA_MODEL)
         self._messages: list[dict] = [
             {"role": "system", "content": brain.SYSTEM_PROMPT + "\n\n" + VOICE_HINT}
         ]

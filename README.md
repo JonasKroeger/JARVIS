@@ -9,9 +9,9 @@ python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 # macOS: brew install ollama && brew services start ollama
-ollama pull llama3.1:8b
-# Faster alternative (recommended for snappier replies):
-# ollama pull llama3.2
+ollama pull llama3.2
+# Higher-quality fallback (slower on Apple Silicon for chat):
+# ollama pull llama3.1:8b
 ```
 
 ## Run (desktop first)
@@ -25,7 +25,7 @@ python app.py
 
 The window is a frameless **cinematic HUD** (default ~1180×740). Status strip uses `SYS // OLLAMA READY`, `SYS // SYNTHESIZING` (waiting on Ollama), `SYS // SPEAKING` (TTS playing), `SYS // LISTENING`. Left side is a multi-layer pulse/radar; right side stacks transcript + transmit bar. Telemetry shows `EL REQ // N` whenever TTS/`speak_async` is invoked. Startup fails fast if the model is missing (suggests `ollama pull …`).
 
-Short greetings/chitchat (≤40 chars) and short personal-fact questions (name, home, preferences, “what do you know about me”) skip the tools schema for a faster single Ollama round-trip (memory is still injected); real asks still get tools. Lean calls use `keep_alive=30m` and a lower `num_predict`.
+Short greetings/chitchat, personal-fact questions, and short general Q&A (≤120 chars: “what is pi”, math, who/what/explain, jokes) skip the tools schema when there is no Mac/action intent — faster single Ollama round-trip (memory is still injected). Action phrases (open/weather/calendar/remember/clipboard/…) still get tools. Lean no-tools calls use `keep_alive=30m` and `num_predict=96`.
 
 ### CLI (secondary)
 
@@ -40,7 +40,7 @@ The CLI also prints `JARVIS › Thinking…` before each reply, and exits if the
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `OLLAMA_HOST` | `http://127.0.0.1:11434` | Ollama API base |
-| `OLLAMA_MODEL` | `llama3.1:8b` | Chat model (`llama3.2` is faster if you prefer) |
+| `OLLAMA_MODEL` | `llama3.2` | Chat model (3b-class, snappy). Fallback: `llama3.1:8b` for quality |
 | `ELEVENLABS_API_KEY` | *(unset)* | Enables ElevenLabs TTS; without it, macOS `say` is used |
 | `ELEVENLABS_VOICE_ID` | `onwK4e9ZLuTAKqWW03F9` (Daniel — British male) | Override voice |
 | `ELEVENLABS_MODEL_ID` | `eleven_flash_v2_5` | ElevenLabs TTS model (flash = lower latency; override if needed) |

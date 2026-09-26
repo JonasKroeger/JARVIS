@@ -27,7 +27,10 @@ import memory as memory_store
 import httpx
 
 OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "http://127.0.0.1:11434").rstrip("/")
+# Prefer 3b-class for snappy local chat; override with OLLAMA_MODEL (e.g. llama3.1:8b for quality).
+DEFAULT_OLLAMA_MODEL = "llama3.2"
 MAX_TOOL_ROUNDS = 6
+SKIP_TOOLS_MAX_CHARS = 120
 CLIPBOARD_MAX_CHARS = 20_000
 NOTIFY_TITLE_MAX = 200
 NOTIFY_MESSAGE_MAX = 2_000
@@ -64,9 +67,10 @@ projects, people, routines). Call list_memories / forget when asked. Never inven
 the injected list and tool results.
 
 When the user says good morning / brief me / status report (or similar), call daily_briefing and
-narrate the structured result — do not invent the briefing. Pure hi/thanks chitchat and short
-personal-fact questions → plain text, no tools (memory is still injected). Only tool-call for actions
-or live data.
+narrate the structured result — do not invent the briefing. Pure hi/thanks chitchat, short
+personal-fact questions, and simple factual/conversational Q&A (math, definitions, history, trivia,
+jokes) → plain text, no tools (memory is still injected). Answer those directly without calling tools.
+Only tool-call for Mac actions or live data (weather, calendar, files, search, etc.).
 
 Answer factual/historical questions neutrally. Refuse only requests for harm, crime, or illegal/
 exploitative material."""
@@ -2111,6 +2115,51 @@ _PERSONAL_MEMORY_RE = re.compile(
 )
 
 
+# Mac / live-data intents — keep the full tools schema when these appear.
+_ACTION_INTENT_RE = re.compile(
+    r"(?:"
+    r"\b(?:open|launch)\s+\w|"
+    r"\b(?:play|pause|resume)\s+(?:music|spotify|song|track|apple\s+music)|"
+    r"\b(?:next|previous)\s+(?:track|song)|"
+    r"\b(?:search\s+(?:the\s+)?web|web\s+search|google\s+for)\b|"
+    r"\b(?:weather|forecast)\b|"
+    r"\b(?:calendar|agenda)\b|"
+    r"\b(?:remind(?:er|ers|\s+me)?|create\s+reminder)\b|"
+    r"\b(?:timer|countdown)\b|"
+    r"\b(?:volume|mute|unmute)\b|"
+    r"\b(?:screenshot|screen\s*shot)\b|"
+    r"\b(?:github|pull\s+requests?)\b|"
+    r"\b(?:clipboard)\b|"
+    r"\b(?:read\s+(?:the\s+)?file|list\s+(?:notes|files|running\s+apps))\b|"
+    r"\b(?:notify|notification|send\s+(?:a\s+)?notification)\b|"
+    r"\b(?:brief(?:ing)?\s+me|good\s+morning|status\s+report|daily\s+brief)\b|"
+    r"\b(?:remember|forget|recall|list\s+memor)\b|"
+    r"\b(?:stock(?:s)?|share\s+price|ticker)\b|"
+    r"\b(?:dark\s+mode|light\s+mode)\b|"
+    r"\b(?:fetch\s+(?:url|https?://)|download\s+https?://)\b|"
+    r"\b(?:running\s+apps|system\s+status|cpu\s+usage|battery\s+(?:status|level))\b|"
+    r"\b(?:what(?:'s|s| is)\s+(?:the\s+)?(?:time|weather|clipboard)|what\s+time\s+is\s+it)\b|"
+    r"\b(?:save\s+(?:a\s+)?note|create\s+(?:a\s+)?note|write\s+(?:a\s+)?note)\b|"
+    r"\b(?:set\s+(?:a\s+)?(?:timer|reminder|volume))\b"
+    r")",
+    re.IGNORECASE,
+)
+
+# Short general Q&A / conversational asks that the model can answer without Mac tools.
+_GENERAL_QA_RE = re.compile(
+    r"(?:"
+    r"^\s*(?:what|who|why|when|where|how|which|whose|whom)\b|"
+    r"^\s*(?:is|are|was|were|do|does|did|can|could|would|should)\b|"
+    r"^\s*(?:tell\s+me|explain|define|describe|summarize|summarise)\b|"
+    r"^\s*(?:joke|tell\s+me\s+a\s+joke|make\s+me\s+laugh)\b|"
+    r"\?|"
+    r"^\s*(?:what(?:'s|s)\s+)\d|"
+    r"^\s*\d+\s*[+\-*/]"
+    r")",
+    re.IGNORECASE,
+)
+
+
 def is_chitchat(text: str) -> bool:
     """Short greetings/thanks — skip tools for a faster Ollama round-trip.
 
@@ -2137,9 +2186,38 @@ def is_personal_memory_question(text: str) -> bool:
     return bool(_PERSONAL_MEMORY_RE.match(t))
 
 
+def looks_like_action_intent(text: str) -> bool:
+    """True when the user likely wants a Mac tool / live data."""
+    return bool(_ACTION_INTENT_RE.search(text or ""))
+
+
+def is_short_general_qa(text: str) -> bool:
+    """Short factual/conversational questions that do not need Mac tools.
+
+    Examples: "what is pi", "what's 2+2", "who is Einstein", "explain gravity briefly",
+    "tell me a joke". Long or action-oriented turns keep tools.
+    """
+    t = (text or "").strip()
+    if not t or len(t) > SKIP_TOOLS_MAX_CHARS:
+        return False
+    if _BRIEFING_RE.match(t):
+        return False
+    if looks_like_action_intent(t):
+        return False
+    return bool(_GENERAL_QA_RE.search(t))
+
+
 def should_skip_tools(text: str) -> bool:
-    """True when this user turn can use the lean no-tools Ollama path."""
-    return is_chitchat(text) or is_personal_memory_question(text)
+    """True when this user turn can use the lean no-tools Ollama path.
+
+    Skip for chitchat, personal-memory questions, and short general Q&A with no
+    action/live-data intent. Cap length so long requests still get tools.
+    """
+    return (
+        is_chitchat(text)
+        or is_personal_memory_question(text)
+        or is_short_general_qa(text)
+    )
 
 
 def chat_round(
@@ -2157,7 +2235,7 @@ def chat_round(
         # Keep the model loaded between turns; cap tokens on lean (no-tools) replies.
         "keep_alive": "30m",
         "options": {
-            "num_predict": 128 if not use_tools else 512,
+            "num_predict": 96 if not use_tools else 512,
         },
     }
     if use_tools:
@@ -2205,8 +2283,8 @@ def run_turn(
 ) -> tuple[list[dict[str, Any]], str]:
     """Run tool rounds until assistant returns text or cap hit.
 
-    Short greetings/chitchat and personal-fact questions skip the tools schema for a
-    faster single round-trip; long-term memory is still injected so answers can use known facts.
+    Short greetings/chitchat, personal-fact questions, and short general Q&A skip the
+    tools schema for a faster single round-trip; long-term memory is still injected.
     """
     # Refresh sticky memory system message before each model call path.
     state = memory_store.inject_memory_messages(messages)
@@ -2234,7 +2312,7 @@ def run_turn(
 
 
 def main() -> None:
-    model = os.environ.get("OLLAMA_MODEL", "llama3.1:8b")
+    model = os.environ.get("OLLAMA_MODEL", DEFAULT_OLLAMA_MODEL)
     print(f"JARVIS — model={model}  ollama={OLLAMA_HOST}")
     print("Commands: /exit /quit  |  /clear  |  /model <name>")
     print("Notes folder:", NOTES_DIR)
