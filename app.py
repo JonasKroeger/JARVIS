@@ -56,7 +56,7 @@ except ImportError:
     sd = None  # type: ignore[assignment]
 
 try:
-    from voice import speak_async, transcribe_audio
+    from voice import cancel_speak, speak_async, transcribe_audio
 except ImportError:
     cancel_speak = None  # type: ignore[assignment]
     speak_async = None  # type: ignore[assignment]
