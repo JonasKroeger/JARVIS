@@ -10,6 +10,7 @@ import os
 import platform
 import re
 import shutil
+import socket
 import subprocess
 import sys
 import urllib.parse
@@ -23,14 +24,21 @@ import httpx
 OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "http://127.0.0.1:11434").rstrip("/")
 MAX_TOOL_ROUNDS = 6
 CLIPBOARD_MAX_CHARS = 20_000
+NOTIFY_TITLE_MAX = 200
+NOTIFY_MESSAGE_MAX = 2_000
+REMINDER_TEXT_MAX = 2_000
+READ_FILE_DEFAULT_MAX = 50_000
+READ_FILE_HARD_MAX = 500_000
+RUNNING_APPS_CAP = 40
 
 NOTES_DIR = Path.home() / ".jarvis" / "notes"
 
 SYSTEM_PROMPT = """You are JARVIS, a calm, precise local assistant. Be brief unless asked for detail;
 dry wit is fine, never cruel. Call tools for real actions/data — never invent timestamps, notes,
-clipboard, weather, GitHub, or command output.
+clipboard, weather, GitHub, system status, search results, file contents, or command output.
 
-Tools: open_url, open_app, get_clipboard/set_clipboard, get_weather, github_status, time, notes.
+Tools: time, notes, open_url, open_app, clipboard, get_weather, github_status, get_system_status,
+notify, create_reminder, music_control, take_screenshot, list_running_apps, read_file, web_search.
 Greetings/chitchat → plain text, no tools. Only tool-call for actions or live data.
 
 Answer factual/historical questions neutrally. Refuse only requests for harm, crime, or illegal/
@@ -179,6 +187,121 @@ TOOLS: list[dict[str, Any]] = [
                     }
                 },
                 "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_system_status",
+            "description": "Battery, disk free space, uptime, and hostname for this machine.",
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "notify",
+            "description": "Shows a macOS desktop notification with title and message.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string", "description": "Notification title."},
+                    "message": {"type": "string", "description": "Notification body."},
+                },
+                "required": ["title", "message"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "create_reminder",
+            "description": "Creates a macOS Reminders item. Optional freeform due date; if unparsed, due is appended to the body.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string", "description": "Reminder title/body."},
+                    "due": {
+                        "type": "string",
+                        "description": "Optional freeform due hint (e.g. tomorrow 5pm).",
+                    },
+                },
+                "required": ["text"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "music_control",
+            "description": "Control Music.app (or Spotify fallback): play, pause, next, previous, or status.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "description": "One of: play, pause, next, previous, status",
+                    }
+                },
+                "required": ["action"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "take_screenshot",
+            "description": "Captures the screen to a PNG under the home directory (default ~/Desktop).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Optional save path; must resolve under home.",
+                    }
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_running_apps",
+            "description": "Lists names of visible running applications (capped).",
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "read_file",
+            "description": "Reads a text file under the home directory (utf-8, truncated if large).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "File path under home."},
+                    "max_bytes": {
+                        "type": "integer",
+                        "description": "Max bytes to read (default 50000).",
+                    },
+                },
+                "required": ["path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "web_search",
+            "description": "DuckDuckGo Instant Answer search (AbstractText/URL + related snippets). No API key.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Search query."}
+                },
+                "required": ["query"],
             },
         },
     },
@@ -545,6 +668,461 @@ def tool_github_status(args: dict[str, Any]) -> str:
     return json.dumps(result)
 
 
+def _escape_applescript(s: str) -> str:
+    """Escape a string for safe embedding in AppleScript double-quoted literals."""
+    return s.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def _clip_str(s: str, max_len: int) -> str:
+    if len(s) <= max_len:
+        return s
+    return s[: max_len - 1] + "…"
+
+
+def _resolve_under_home(path_str: str) -> Path | None:
+    """Resolve path; return None if it escapes the user's home directory."""
+    if not path_str or not isinstance(path_str, str):
+        return None
+    try:
+        home = Path.home().resolve()
+        p = Path(path_str).expanduser().resolve()
+        p.relative_to(home)
+        return p
+    except (OSError, ValueError, RuntimeError):
+        return None
+
+
+def _run_cmd(argv: list[str], timeout: float = 15.0) -> tuple[int, str, str]:
+    proc = subprocess.run(
+        argv,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        shell=False,
+    )
+    return proc.returncode, (proc.stdout or "").strip(), (proc.stderr or "").strip()
+
+
+def _osascript(script: str, timeout: float = 20.0) -> tuple[int, str, str]:
+    return _run_cmd(["osascript", "-e", script], timeout=timeout)
+
+
+def _parse_battery_pmset(out: str) -> dict[str, Any]:
+    info: dict[str, Any] = {}
+    # e.g. " -InternalBattery-0 (id=...)	82%; charging; ..."
+    m = re.search(r"(\d+)\s*%", out)
+    if m:
+        info["percent"] = int(m.group(1))
+    low = out.lower()
+    if "charging" in low and "discharging" not in low:
+        info["charging"] = True
+    elif "discharging" in low:
+        info["charging"] = False
+    elif "charged" in low or "ac attached" in low:
+        info["charging"] = True
+    else:
+        info["charging"] = None
+    return info
+
+
+def _linux_battery() -> dict[str, Any] | None:
+    base = Path("/sys/class/power_supply")
+    if not base.is_dir():
+        return None
+    for bat in sorted(base.glob("BAT*")):
+        try:
+            cap = (bat / "capacity").read_text(encoding="utf-8").strip()
+            status = (bat / "status").read_text(encoding="utf-8").strip().lower()
+            percent = int(cap)
+            charging = status in ("charging", "full")
+            if status == "discharging":
+                charging = False
+            return {"percent": percent, "charging": charging, "status": status}
+        except (OSError, ValueError):
+            continue
+    return None
+
+
+def tool_get_system_status(_: dict[str, Any]) -> str:
+    system = platform.system()
+    result: dict[str, Any] = {"os": system}
+
+    # hostname
+    hostname = None
+    if system == "Darwin":
+        try:
+            code, out, err = _run_cmd(["scutil", "--get", "ComputerName"], timeout=5.0)
+            if code == 0 and out:
+                hostname = out
+        except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+            pass
+    if not hostname:
+        try:
+            hostname = socket.gethostname()
+        except OSError as e:
+            hostname = None
+            result["hostname_error"] = str(e)
+    result["hostname"] = hostname
+
+    # battery
+    if system == "Darwin":
+        try:
+            code, out, err = _run_cmd(["pmset", "-g", "batt"], timeout=10.0)
+            if code == 0 and out:
+                result["battery"] = _parse_battery_pmset(out)
+            else:
+                result["battery"] = {"error": err or out or "pmset failed"}
+        except FileNotFoundError:
+            result["battery"] = {"error": "pmset not found"}
+        except subprocess.TimeoutExpired:
+            result["battery"] = {"error": "pmset timed out"}
+        except OSError as e:
+            result["battery"] = {"error": str(e)}
+    else:
+        bat = _linux_battery()
+        result["battery"] = bat if bat is not None else {"error": "battery info unavailable"}
+
+    # disk
+    try:
+        code, out, err = _run_cmd(["df", "-h", "/"], timeout=10.0)
+        if code == 0 and out:
+            lines = [ln for ln in out.splitlines() if ln.strip()]
+            # header + data; take last data line
+            data_line = lines[-1] if len(lines) >= 1 else ""
+            parts = data_line.split()
+            # Filesystem Size Used Avail Capacity Mounted
+            disk: dict[str, Any] = {"raw": data_line}
+            if len(parts) >= 5:
+                disk["size"] = parts[1]
+                disk["used"] = parts[2]
+                disk["avail"] = parts[3]
+                disk["capacity"] = parts[4]
+            result["disk"] = disk
+        else:
+            result["disk"] = {"error": err or out or "df failed"}
+    except FileNotFoundError:
+        result["disk"] = {"error": "df not found"}
+    except subprocess.TimeoutExpired:
+        result["disk"] = {"error": "df timed out"}
+    except OSError as e:
+        result["disk"] = {"error": str(e)}
+
+    # uptime
+    try:
+        code, out, err = _run_cmd(["uptime"], timeout=5.0)
+        if code == 0 and out:
+            result["uptime"] = out
+        else:
+            result["uptime"] = {"error": err or out or "uptime failed"}
+    except FileNotFoundError:
+        result["uptime"] = {"error": "uptime not found"}
+    except subprocess.TimeoutExpired:
+        result["uptime"] = {"error": "uptime timed out"}
+    except OSError as e:
+        result["uptime"] = {"error": str(e)}
+
+    return json.dumps(result)
+
+
+def tool_notify(args: dict[str, Any]) -> str:
+    title = args.get("title", "")
+    message = args.get("message", "")
+    if not isinstance(title, str):
+        title = str(title)
+    if not isinstance(message, str):
+        message = str(message)
+    title = title.strip()
+    message = message.strip()
+    if not title and not message:
+        return json.dumps({"ok": False, "error": "title and message are empty"})
+    if len(title) > NOTIFY_TITLE_MAX * 4 or len(message) > NOTIFY_MESSAGE_MAX * 4:
+        return json.dumps({"ok": False, "error": "title or message insanely long"})
+    title = _clip_str(title, NOTIFY_TITLE_MAX)
+    message = _clip_str(message, NOTIFY_MESSAGE_MAX)
+    if platform.system() != "Darwin":
+        return json.dumps({"ok": False, "error": "notify is macOS-only (osascript)"})
+    et = _escape_applescript(title)
+    em = _escape_applescript(message)
+    script = f'display notification "{em}" with title "{et}"'
+    try:
+        code, out, err = _osascript(script, timeout=15.0)
+    except FileNotFoundError:
+        return json.dumps({"ok": False, "error": "osascript not found"})
+    except subprocess.TimeoutExpired:
+        return json.dumps({"ok": False, "error": "osascript timed out"})
+    except OSError as e:
+        return json.dumps({"ok": False, "error": str(e)})
+    if code != 0:
+        return json.dumps({"ok": False, "error": err or out or "osascript failed", "returncode": code})
+    return json.dumps({"ok": True, "title": title, "message": message})
+
+
+def tool_create_reminder(args: dict[str, Any]) -> str:
+    text = args.get("text", "")
+    if not isinstance(text, str):
+        text = str(text)
+    text = text.strip()
+    due = args.get("due", "")
+    if due is None:
+        due = ""
+    if not isinstance(due, str):
+        due = str(due)
+    due = due.strip()
+    if not text:
+        return json.dumps({"ok": False, "error": "text is required"})
+    if len(text) > REMINDER_TEXT_MAX * 4 or len(due) > REMINDER_TEXT_MAX * 4:
+        return json.dumps({"ok": False, "error": "text or due insanely long"})
+    text = _clip_str(text, REMINDER_TEXT_MAX)
+    due = _clip_str(due, REMINDER_TEXT_MAX) if due else ""
+    if platform.system() != "Darwin":
+        return json.dumps({"ok": False, "error": "create_reminder is macOS-only (Reminders/osascript)"})
+    # Keep due in body when freeform parsing is unreliable
+    body = text
+    due_note = False
+    if due:
+        body = f"{text} (due: {due})"
+        due_note = True
+    et = _escape_applescript(body)
+    script = (
+        'tell application "Reminders"\n'
+        f'  make new reminder with properties {{name:"{et}"}}\n'
+        "end tell"
+    )
+    try:
+        code, out, err = _osascript(script, timeout=20.0)
+    except FileNotFoundError:
+        return json.dumps({"ok": False, "error": "osascript not found"})
+    except subprocess.TimeoutExpired:
+        return json.dumps({"ok": False, "error": "osascript timed out"})
+    except OSError as e:
+        return json.dumps({"ok": False, "error": str(e)})
+    if code != 0:
+        return json.dumps({"ok": False, "error": err or out or "osascript failed", "returncode": code})
+    return json.dumps({"ok": True, "text": body, "due_in_body": due_note})
+
+
+def _music_osascript(app: str, action: str) -> tuple[int, str, str]:
+    app_q = _escape_applescript(app)
+    if action == "play":
+        script = f'tell application "{app_q}" to play'
+    elif action == "pause":
+        script = f'tell application "{app_q}" to pause'
+    elif action == "next":
+        script = f'tell application "{app_q}" to next track'
+    elif action == "previous":
+        script = f'tell application "{app_q}" to previous track'
+    elif action == "status":
+        script = (
+            f'tell application "{app_q}"\n'
+            "  set t to name of current track\n"
+            "  set a to artist of current track\n"
+            "  set p to player state as string\n"
+            '  return t & " | " & a & " | " & p\n'
+            "end tell"
+        )
+    else:
+        return 1, "", f"unknown action: {action}"
+    return _osascript(script, timeout=15.0)
+
+
+def tool_music_control(args: dict[str, Any]) -> str:
+    action = str(args.get("action", "")).strip().lower()
+    if action not in ("play", "pause", "next", "previous", "status"):
+        return json.dumps(
+            {
+                "ok": False,
+                "error": "action must be one of: play, pause, next, previous, status",
+            }
+        )
+    if platform.system() != "Darwin":
+        return json.dumps({"ok": False, "error": "music_control is macOS-only"})
+    last_err = ""
+    for app in ("Music", "Spotify"):
+        try:
+            code, out, err = _music_osascript(app, action)
+        except FileNotFoundError:
+            return json.dumps({"ok": False, "error": "osascript not found"})
+        except subprocess.TimeoutExpired:
+            last_err = f"{app}: timed out"
+            continue
+        except OSError as e:
+            last_err = f"{app}: {e}"
+            continue
+        if code == 0:
+            if action == "status":
+                parts = [p.strip() for p in (out or "").split("|")]
+                track = parts[0] if len(parts) > 0 else ""
+                artist = parts[1] if len(parts) > 1 else ""
+                state = parts[2] if len(parts) > 2 else ""
+                return json.dumps(
+                    {
+                        "ok": True,
+                        "app": app,
+                        "track": track,
+                        "artist": artist,
+                        "state": state,
+                        "raw": out,
+                    }
+                )
+            return json.dumps({"ok": True, "app": app, "action": action})
+        last_err = err or out or f"{app} failed ({code})"
+    return json.dumps({"ok": False, "error": last_err or "Music and Spotify both failed"})
+
+
+def tool_take_screenshot(args: dict[str, Any]) -> str:
+    if platform.system() != "Darwin":
+        return json.dumps({"ok": False, "error": "take_screenshot is macOS-only (screencapture)"})
+    path_arg = args.get("path")
+    if path_arg is None or str(path_arg).strip() == "":
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        dest = Path.home() / "Desktop" / f"jarvis-shot-{stamp}.png"
+    else:
+        resolved = _resolve_under_home(str(path_arg))
+        if resolved is None:
+            return json.dumps({"ok": False, "error": "path must resolve under home directory"})
+        dest = resolved
+    # Ensure parent under home and exists
+    try:
+        home = Path.home().resolve()
+        dest.resolve().relative_to(home)
+    except (OSError, ValueError):
+        return json.dumps({"ok": False, "error": "path must resolve under home directory"})
+    try:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        return json.dumps({"ok": False, "error": f"cannot create parent dir: {e}"})
+    bin_path = "/usr/sbin/screencapture"
+    if not Path(bin_path).is_file():
+        bin_path = "/usr/bin/screencapture"
+    try:
+        code, out, err = _run_cmd([bin_path, "-x", str(dest)], timeout=30.0)
+    except FileNotFoundError:
+        return json.dumps({"ok": False, "error": "screencapture not found"})
+    except subprocess.TimeoutExpired:
+        return json.dumps({"ok": False, "error": "screencapture timed out"})
+    except OSError as e:
+        return json.dumps({"ok": False, "error": str(e)})
+    if code != 0:
+        return json.dumps({"ok": False, "error": err or out or "screencapture failed", "returncode": code})
+    if not dest.is_file():
+        return json.dumps({"ok": False, "error": "screencapture reported ok but file missing", "path": str(dest)})
+    return json.dumps({"ok": True, "path": str(dest)})
+
+
+def tool_list_running_apps(_: dict[str, Any]) -> str:
+    if platform.system() != "Darwin":
+        return json.dumps({"error": "list_running_apps is macOS-only", "apps": []})
+    script = (
+        'tell application "System Events"\n'
+        "  get name of every process whose background only is false\n"
+        "end tell"
+    )
+    try:
+        code, out, err = _osascript(script, timeout=20.0)
+    except FileNotFoundError:
+        return json.dumps({"error": "osascript not found", "apps": []})
+    except subprocess.TimeoutExpired:
+        return json.dumps({"error": "osascript timed out", "apps": []})
+    except OSError as e:
+        return json.dumps({"error": str(e), "apps": []})
+    if code != 0:
+        return json.dumps({"error": err or out or "osascript failed", "apps": []})
+    # osascript returns comma-separated list
+    names = [n.strip() for n in (out or "").split(",") if n.strip()]
+    capped = False
+    if len(names) > RUNNING_APPS_CAP:
+        names = names[:RUNNING_APPS_CAP]
+        capped = True
+    return json.dumps({"apps": names, "count": len(names), "capped": capped})
+
+
+def tool_read_file(args: dict[str, Any]) -> str:
+    path_str = str(args.get("path", "")).strip()
+    if not path_str:
+        return json.dumps({"error": "path is required"})
+    resolved = _resolve_under_home(path_str)
+    if resolved is None:
+        return json.dumps({"error": "path must resolve under home directory"})
+    max_bytes = args.get("max_bytes", READ_FILE_DEFAULT_MAX)
+    try:
+        max_bytes = int(max_bytes)
+    except (TypeError, ValueError):
+        max_bytes = READ_FILE_DEFAULT_MAX
+    if max_bytes < 1:
+        max_bytes = READ_FILE_DEFAULT_MAX
+    if max_bytes > READ_FILE_HARD_MAX:
+        max_bytes = READ_FILE_HARD_MAX
+    if not resolved.is_file():
+        return json.dumps({"error": "not a file", "path": str(resolved)})
+    try:
+        raw = resolved.read_bytes()
+    except OSError as e:
+        return json.dumps({"error": str(e), "path": str(resolved)})
+    truncated = len(raw) > max_bytes
+    if truncated:
+        raw = raw[:max_bytes]
+    content = raw.decode("utf-8", errors="replace")
+    return json.dumps(
+        {
+            "path": str(resolved),
+            "content": content,
+            "truncated": truncated,
+            "bytes_read": len(raw),
+        }
+    )
+
+
+def tool_web_search(args: dict[str, Any]) -> str:
+    query = str(args.get("query", "")).strip()
+    if not query:
+        return json.dumps({"error": "query is required"})
+    if len(query) > 500:
+        return json.dumps({"error": "query too long"})
+    params = {
+        "q": query,
+        "format": "json",
+        "no_html": "1",
+        "skip_disambig": "1",
+    }
+    url = "https://api.duckduckgo.com/"
+    try:
+        with httpx.Client(timeout=20.0, follow_redirects=True) as client:
+            r = client.get(url, params=params, headers={"User-Agent": "jarvis-local/1.0"})
+            r.raise_for_status()
+            data = r.json()
+    except httpx.HTTPError as e:
+        return json.dumps({"error": f"search request failed: {e}", "query": query})
+    except (json.JSONDecodeError, ValueError) as e:
+        return json.dumps({"error": f"invalid search response: {e}", "query": query})
+
+    if not isinstance(data, dict):
+        return json.dumps({"error": "unexpected search response shape", "query": query})
+
+    related: list[str] = []
+    for item in data.get("RelatedTopics") or []:
+        if len(related) >= 5:
+            break
+        if isinstance(item, dict):
+            if "Topics" in item and isinstance(item["Topics"], list):
+                for sub in item["Topics"]:
+                    if len(related) >= 5:
+                        break
+                    if isinstance(sub, dict) and sub.get("Text"):
+                        related.append(str(sub["Text"]))
+            elif item.get("Text"):
+                related.append(str(item["Text"]))
+
+    return json.dumps(
+        {
+            "query": query,
+            "AbstractText": data.get("AbstractText") or "",
+            "AbstractURL": data.get("AbstractURL") or "",
+            "RelatedTopics": related,
+            "Heading": data.get("Heading") or "",
+        }
+    )
+
+
 TOOL_DISPATCH = {
     "get_current_time": tool_get_current_time,
     "list_notes": tool_list_notes,
@@ -556,6 +1134,14 @@ TOOL_DISPATCH = {
     "set_clipboard": tool_set_clipboard,
     "get_weather": tool_get_weather,
     "github_status": tool_github_status,
+    "get_system_status": tool_get_system_status,
+    "notify": tool_notify,
+    "create_reminder": tool_create_reminder,
+    "music_control": tool_music_control,
+    "take_screenshot": tool_take_screenshot,
+    "list_running_apps": tool_list_running_apps,
+    "read_file": tool_read_file,
+    "web_search": tool_web_search,
 }
 
 
