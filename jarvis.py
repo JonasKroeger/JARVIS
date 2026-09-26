@@ -552,11 +552,10 @@ TOOLS: list[dict[str, Any]] = [
         "function": {
             "name": "ask_coder",
             "description": (
-                "Send a prompt to Coder (Grok Bot) via the local reverse bridge "
-                "mailbox on 127.0.0.1:8766 and return Coder's reply. Call immediately "
-                "when the user mentions Coder (no greeting/preamble first). Use when "
-                "the user wants help from Coder, coding assistance beyond local tools, "
-                "or explicitly asks to ask/tell/talk to/message/ping Coder."
+                "Send a prompt to Coder via the shared room on 127.0.0.1:8767 "
+                "(JARVIS ↔ Coder group mirror transport) and return Coder's reply. "
+                "Call immediately when the user mentions Coder (no greeting/preamble). "
+                "Does NOT invent replies — waits for an explicit parent fulfill."
             ),
             "parameters": {
                 "type": "object",
@@ -2023,70 +2022,181 @@ def _ask_coder_debug(msg: str) -> None:
         pass
 
 
+def _coder_room_base() -> str:
+    """Shared-room base URL (default :8767). Legacy :8766 mailbox is deprecated."""
+    explicit = os.environ.get("CODER_ROOM_URL", "").strip().rstrip("/")
+    if explicit:
+        return explicit
+    # CODER_URL may still point at old mailbox — ignore 8766 for happy path
+    legacy = os.environ.get("CODER_URL", "").strip().rstrip("/")
+    if legacy and ":8766" not in legacy and "/chat" not in legacy:
+        return legacy
+    port = os.environ.get("CODER_ROOM_PORT", "8767").strip() or "8767"
+    return f"http://127.0.0.1:{port}"
+
+
+def _wait_coder_room_reply(
+    client: "httpx.Client",
+    *,
+    base: str,
+    after_id: str,
+    handoff_id: str,
+    timeout: float,
+) -> dict[str, Any] | None:
+    """Block on SSE /events for next role=coder message after after_id.
+
+    Never invents a reply. Returns the coder message dict or None on timeout.
+    """
+    # Prefer SSE; fall back to short GET /messages poll if SSE unavailable.
+    deadline = time.monotonic() + timeout
+    events_url = f"{base}/events"
+    try:
+        with client.stream(
+            "GET",
+            events_url,
+            params={"after_id": after_id, "role": "coder"},
+            timeout=httpx.Timeout(timeout + 5.0, connect=5.0),
+        ) as resp:
+            resp.raise_for_status()
+            event_name = "message"
+            data_lines: list[str] = []
+            for line in resp.iter_lines():
+                if time.monotonic() >= deadline:
+                    return None
+                if line is None:
+                    continue
+                if line.startswith("event:"):
+                    event_name = line[6:].strip() or "message"
+                    continue
+                if line.startswith("data:"):
+                    data_lines.append(line[5:].lstrip())
+                    continue
+                if line == "":
+                    if not data_lines:
+                        event_name = "message"
+                        continue
+                    payload = "\n".join(data_lines)
+                    data_lines = []
+                    en = event_name
+                    event_name = "message"
+                    if en in ("ping", "ready"):
+                        continue
+                    try:
+                        msg = json.loads(payload)
+                    except json.JSONDecodeError:
+                        continue
+                    if not isinstance(msg, dict):
+                        continue
+                    if msg.get("role") != "coder":
+                        continue
+                    # Prefer reply_to match; otherwise first coder after handoff
+                    if msg.get("reply_to") and str(msg.get("reply_to")) != str(handoff_id):
+                        continue
+                    return msg
+    except (httpx.HTTPError, httpx.TimeoutException) as e:
+        _ask_coder_debug(f"ask_coder SSE fallback after error: {type(e).__name__}: {e}")
+
+    # Poll fallback
+    while time.monotonic() < deadline:
+        try:
+            r = client.get(
+                f"{base}/messages",
+                params={"after_id": after_id, "limit": "50"},
+                timeout=5.0,
+            )
+            r.raise_for_status()
+            data = r.json()
+            for msg in data.get("messages") or []:
+                if not isinstance(msg, dict) or msg.get("role") != "coder":
+                    continue
+                if msg.get("reply_to") and str(msg.get("reply_to")) != str(handoff_id):
+                    continue
+                return msg
+        except Exception:  # noqa: BLE001
+            pass
+        time.sleep(0.15)
+    return None
+
+
 def tool_ask_coder(args: dict[str, Any]) -> str:
-    """POST message to local Coder mailbox (reverse bridge)."""
+    """Post user handoff into shared room and wait for explicit coder reply (SSE)."""
     message = str(args.get("message", "")).strip()
     if not message:
         return json.dumps({"ok": False, "error": "message is required"})
     if len(message) > 50_000:
         return json.dumps({"ok": False, "error": "message too long"})
-    url = os.environ.get("CODER_URL", "http://127.0.0.1:8766/chat").strip() or (
-        "http://127.0.0.1:8766/chat"
-    )
-    api_key = os.environ.get("CODER_BRIDGE_API_KEY", "").strip() or None
+    base = _coder_room_base()
     try:
-        timeout = float(os.environ.get("CODER_BRIDGE_TIMEOUT", "90"))
+        timeout = float(os.environ.get("CODER_ROOM_TIMEOUT", os.environ.get("CODER_BRIDGE_TIMEOUT", "90")))
     except ValueError:
         timeout = 90.0
     timeout = max(5.0, min(timeout, 600.0))
-    headers = {"Content-Type": "application/json"}
-    if api_key:
-        headers["Authorization"] = f"Bearer {api_key}"
-    body = {"message": message, "context": {"source": "jarvis-tool"}}
-    _ask_coder_debug(f"ask_coder POST url={url} timeout={timeout:.0f}s msg={message[:120]!r}")
+    _ask_coder_debug(f"ask_coder ROOM POST base={base} timeout={timeout:.0f}s msg={message[:120]!r}")
     t0 = time.monotonic()
     try:
-        with httpx.Client(timeout=timeout) as client:
-            r = client.post(url, json=body, headers=headers)
-            if r.status_code == 504:
-                detail = ""
-                try:
-                    detail = str((r.json() or {}).get("error") or "")
-                except Exception:  # noqa: BLE001
-                    detail = (r.text or "")[:300]
-                err = detail or (
-                    f"Coder bridge: no worker replied within {timeout:.0f}s "
-                    "(fulfill: python fulfill_coder_reply.py --reply TEXT)"
-                )
-                _ask_coder_debug(f"ask_coder 504 after {time.monotonic()-t0:.1f}s: {err[:200]}")
-                return json.dumps({"ok": False, "error": err, "url": url, "status": 504})
+        with httpx.Client(timeout=timeout + 10.0) as client:
+            # Cursor before post so we never miss the coder reply
+            try:
+                pre = client.get(f"{base}/messages", params={"limit": "1"}, timeout=5.0)
+                pre.raise_for_status()
+                pre_msgs = (pre.json() or {}).get("messages") or []
+                after_id = pre_msgs[-1]["id"] if pre_msgs else ""
+            except Exception:  # noqa: BLE001
+                after_id = ""
+
+            r = client.post(
+                f"{base}/messages",
+                json={
+                    "role": "user",
+                    "text": message,
+                    "meta": {"source": "jarvis-tool", "awaiting_coder": True},
+                },
+                timeout=10.0,
+            )
             r.raise_for_status()
-            data = r.json()
-    except httpx.TimeoutException:
-        err = (
-            f"Coder bridge: no worker replied within {timeout:.0f}s "
-            "(mailbox up but no live fulfill yet — "
-            "run: python fulfill_coder_reply.py --pending)"
-        )
-        _ask_coder_debug(f"ask_coder timeout after {time.monotonic()-t0:.1f}s")
-        return json.dumps({"ok": False, "error": err, "url": url})
+            posted = r.json()
+            handoff = (posted.get("message") or {}) if isinstance(posted, dict) else {}
+            handoff_id = str(handoff.get("id") or "")
+            if not handoff_id:
+                return json.dumps({"ok": False, "error": "room post missing id", "raw": str(posted)[:200]})
+            # Use handoff id as after cursor so we only accept later coder msgs
+            after_id = handoff_id
+            _ask_coder_debug(f"ask_coder room handoff id={handoff_id}; waiting SSE for coder")
+
+            coder_msg = _wait_coder_room_reply(
+                client,
+                base=base,
+                after_id=after_id,
+                handoff_id=handoff_id,
+                timeout=timeout,
+            )
     except httpx.HTTPError as e:
-        _ask_coder_debug(f"ask_coder HTTPError after {time.monotonic()-t0:.1f}s: {e}")
-        return json.dumps({"ok": False, "error": f"coder bridge failed: {e}", "url": url})
+        _ask_coder_debug(f"ask_coder room HTTPError after {time.monotonic()-t0:.1f}s: {e}")
+        return json.dumps({"ok": False, "error": f"coder room failed: {e}", "url": base})
     except Exception as e:  # noqa: BLE001
-        _ask_coder_debug(f"ask_coder error after {time.monotonic()-t0:.1f}s: {type(e).__name__}: {e}")
-        return json.dumps({"ok": False, "error": f"{type(e).__name__}: {e}", "url": url})
-    if not isinstance(data, dict) or "reply" not in data:
-        return json.dumps({"ok": False, "error": "unexpected response", "raw": str(data)[:200]})
+        _ask_coder_debug(f"ask_coder room error after {time.monotonic()-t0:.1f}s: {type(e).__name__}: {e}")
+        return json.dumps({"ok": False, "error": f"{type(e).__name__}: {e}", "url": base})
+
+    if coder_msg is None:
+        err = (
+            f"Coder room: no explicit reply within {timeout:.0f}s "
+            "(parent must: python room_reply.py --reply TEXT "
+            "+ SendToAgent group 832e7e66-c400-4d70-ae0d-88ae44177912)"
+        )
+        _ask_coder_debug(f"ask_coder room timeout after {time.monotonic()-t0:.1f}s")
+        return json.dumps({"ok": False, "error": err, "url": base, "handoff_id": handoff_id, "status": 504})
+
+    reply = str(coder_msg.get("text") or "")
     _ask_coder_debug(
-        f"ask_coder ok after {time.monotonic()-t0:.1f}s id={data.get('id')} "
-        f"reply_len={len(str(data.get('reply') or ''))}"
+        f"ask_coder room ok after {time.monotonic()-t0:.1f}s "
+        f"handoff={handoff_id} coder_id={coder_msg.get('id')} reply_len={len(reply)}"
     )
     return json.dumps(
         {
             "ok": True,
-            "reply": str(data.get("reply") or ""),
-            "id": data.get("id"),
+            "reply": reply,
+            "id": coder_msg.get("id"),
+            "handoff_id": handoff_id,
         }
     )
 
@@ -2699,7 +2809,7 @@ def _force_ask_coder_turn(
     # Early HUD token so orb leaves THINKING while mailbox waits.
     if on_token is not None:
         try:
-            on_token("Contacting Coder…")
+            on_token("Posting to shared room for Coder…")
         except Exception:  # noqa: BLE001
             pass
     result = tool_ask_coder(args)

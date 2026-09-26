@@ -1,18 +1,16 @@
 #!/usr/bin/env python3
-"""JARVIS → Coder client (reverse bridge).
+"""JARVIS → Coder client via shared room (127.0.0.1:8767).
 
-Send a prompt to the local Coder mailbox server and print the reply.
+Posts a user handoff into the room and waits (SSE) for an explicit coder reply.
+NEVER invents answers. Parent fulfills with room_reply.py (+ group SendToAgent).
 
-  python jarvis_ask_coder.py "your prompt here"
+  python jarvis_ask_coder.py "Tell Coder what is 2+2"
 
 Env:
-  CODER_URL              default http://127.0.0.1:8766/chat
-  CODER_BRIDGE_API_KEY   optional Bearer token (only if server has the same key)
+  CODER_ROOM_URL / CODER_ROOM_PORT   default http://127.0.0.1:8767
+  CODER_ROOM_TIMEOUT                 default 90
 
-Flags:
-  --demo   print a mock reply without contacting the server (offline smoke)
-
-Exit 0 on success, 1 on error. Reply text only on stdout; diagnostics on stderr.
+Legacy CODER_URL :8766 mailbox is deprecated and ignored for the happy path.
 """
 
 from __future__ import annotations
@@ -21,77 +19,90 @@ import argparse
 import json
 import os
 import sys
+import time
 import urllib.error
 import urllib.request
+from typing import Any
 
-DEFAULT_URL = "http://127.0.0.1:8766/chat"
+
+def _base() -> str:
+    explicit = os.environ.get("CODER_ROOM_URL", "").strip().rstrip("/")
+    if explicit:
+        return explicit
+    port = os.environ.get("CODER_ROOM_PORT", "8767").strip() or "8767"
+    return f"http://127.0.0.1:{port}"
 
 
-def _post(url: str, message: str, api_key: str | None, source: str, timeout: float) -> str:
-    body = json.dumps(
-        {
-            "message": message,
-            "context": {"source": source},
-        }
-    ).encode("utf-8")
+def _post_json(url: str, body: dict[str, Any], timeout: float) -> dict[str, Any]:
+    raw = json.dumps(body).encode("utf-8")
     req = urllib.request.Request(
-        url,
-        data=body,
-        method="POST",
-        headers={"Content-Type": "application/json"},
+        url, data=raw, method="POST", headers={"Content-Type": "application/json"}
     )
-    if api_key:
-        req.add_header("Authorization", f"Bearer {api_key}")
     with urllib.request.urlopen(req, timeout=timeout) as resp:
-        raw = resp.read().decode("utf-8")
-    data = json.loads(raw)
-    if not isinstance(data, dict) or "reply" not in data:
-        raise RuntimeError(f"unexpected response: {raw[:200]!r}")
-    return str(data["reply"])
+        return json.loads(resp.read().decode("utf-8"))
+
+
+def _get_json(url: str, timeout: float = 10.0) -> dict[str, Any]:
+    with urllib.request.urlopen(url, timeout=timeout) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+
+def _wait_coder(base: str, after_id: str, handoff_id: str, timeout: float) -> str:
+    """Poll /messages for role=coder after handoff (SSE via urllib is awkward)."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            data = _get_json(f"{base}/messages?after_id={after_id}&limit=50", timeout=5.0)
+            for msg in data.get("messages") or []:
+                if not isinstance(msg, dict) or msg.get("role") != "coder":
+                    continue
+                if msg.get("reply_to") and str(msg.get("reply_to")) != str(handoff_id):
+                    continue
+                return str(msg.get("text") or "")
+        except Exception:  # noqa: BLE001
+            pass
+        time.sleep(0.15)
+    raise TimeoutError(
+        f"no coder reply within {timeout:.0f}s "
+        "(fulfill: .venv/bin/python room_reply.py --reply TEXT)"
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(
-        description="Send a prompt to local Coder mailbox and print the reply."
-    )
+    parser = argparse.ArgumentParser(description="Post to shared room and wait for Coder reply.")
     parser.add_argument("prompt", nargs="?", default="", help="Message for Coder")
-    parser.add_argument(
-        "--demo",
-        action="store_true",
-        help="Print a mock reply without contacting the server",
-    )
-    parser.add_argument(
-        "--url",
-        default=os.environ.get("CODER_URL", DEFAULT_URL),
-        help=f"Coder mailbox URL (default {DEFAULT_URL})",
-    )
-    parser.add_argument(
-        "--source",
-        default="jarvis",
-        help="context.source tag (default: jarvis)",
-    )
+    parser.add_argument("--demo", action="store_true", help="Mock reply without contacting room")
     parser.add_argument(
         "--timeout",
         type=float,
-        default=float(os.environ.get("CODER_BRIDGE_TIMEOUT", "90")),
-        help="HTTP timeout seconds (default 90 / CODER_BRIDGE_TIMEOUT)",
+        default=float(os.environ.get("CODER_ROOM_TIMEOUT", os.environ.get("CODER_BRIDGE_TIMEOUT", "90"))),
     )
     args = parser.parse_args(argv)
 
     prompt = (args.prompt or "").strip()
     if args.demo:
-        if not prompt:
-            prompt = "(demo)"
-        print(f"[demo] Coder would reply to: {prompt}")
+        print(f"[demo] Coder would reply to: {prompt or '(demo)'}")
         return 0
-
     if not prompt:
         print('usage: jarvis_ask_coder.py "prompt here"', file=sys.stderr)
         return 1
 
-    api_key = os.environ.get("CODER_BRIDGE_API_KEY", "").strip() or None
+    base = _base()
     try:
-        reply = _post(args.url, prompt, api_key, args.source, args.timeout)
+        posted = _post_json(
+            f"{base}/messages",
+            {"role": "user", "text": prompt, "meta": {"source": "jarvis_ask_coder", "awaiting_coder": True}},
+            timeout=10.0,
+        )
+        handoff = posted.get("message") or {}
+        handoff_id = str(handoff.get("id") or "")
+        if not handoff_id:
+            print("room post missing id", file=sys.stderr)
+            return 1
+        reply = _wait_coder(base, handoff_id, handoff_id, args.timeout)
+    except TimeoutError as e:
+        print(str(e), file=sys.stderr)
+        return 1
     except urllib.error.HTTPError as e:
         detail = e.read().decode("utf-8", errors="replace") if e.fp else ""
         print(f"HTTP {e.code}: {detail or e.reason}", file=sys.stderr)

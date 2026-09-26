@@ -1,5 +1,10 @@
 # JARVIS ↔ Coder bridge
 
+> **Update (feat/real-tools):** Orb ↔ Coder happy path moved to the **shared room**
+> on `127.0.0.1:8767`. See **`ROOM.md`**. Port `8766` mailbox is deprecated.
+> Forward Coder → JARVIS on `:8765` is unchanged.
+
+
 Minimal localhost HTTP APIs so Grok Bot **Coder** and Jonas's Mac **JARVIS** can
 talk both ways. Does **not** call xAI.
 

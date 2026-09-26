@@ -28,3 +28,15 @@ coder_bridge_autofulfill.pid
 coder-bridge-autofulfill.log
 coder_bridge/SURFACED.json
 coder_bridge/surface.log
+
+# Shared room
+coder_room.pid
+coder-room.log
+coder-room-launchd.log
+coder_room/messages.jsonl
+coder_room/room.sqlite
+coder_room/room.sqlite-*
+coder_room/PENDING.json
+coder_room/SURFACED.json
+coder_room/TRIGGER
+coder_room/surface.log
