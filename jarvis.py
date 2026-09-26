@@ -5,6 +5,7 @@ Local JARVIS — text chat with Ollama, session memory, and a few safe tools.
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 import platform
@@ -50,6 +51,21 @@ TOOLS_DECISION_NUM_PREDICT = 128
 TOOLS_NARRATE_NUM_PREDICT = 256
 KEEP_ALIVE = "30m"
 FAST_TEMPERATURE = 0.3
+# Local vision for see_screen (override with JARVIS_VISION_MODEL).
+JARVIS_VISION_MODEL = os.environ.get("JARVIS_VISION_MODEL", "").strip()
+_VISION_MODEL_CACHE: str | None | bool = False  # False=unset, None=none found, str=name
+_VISION_PREFERRED = (
+    "llava:latest",
+    "llava",
+    "moondream:latest",
+    "moondream",
+    "minicpm-v",
+    "qwen2-vl",
+    "bakllava",
+    "llava-llama3",
+)
+SCREEN_CAPTURE_PATH = Path("/tmp/jarvis-screen.png")
+SEE_SCREEN_MAX_CHARS = 750
 
 NOTES_DIR = Path.home() / ".jarvis" / "notes"
 
@@ -57,14 +73,18 @@ NOTES_DIR = Path.home() / ".jarvis" / "notes"
 _ACTIVE_TIMERS: list[dict[str, Any]] = []
 _TIMERS_LOCK = threading.Lock()
 
-SYSTEM_PROMPT = """You are JARVIS — the Iron Man AI: calm, precise, brief. Dry British-adjacent wit
+SYSTEM_PROMPT = """You are JARVIS — a calm, precise holographic assistant. Dry British-adjacent wit
 is welcome; never cruel, never chatty, never sycophantic, never a help-desk script.
 Address Jonas by name when useful. Occasional "sir" is classic cadence — not every line.
 Prefer one or two short spoken sentences. No emoji. No markdown, bullets, or code fences in
 answers that may be read aloud (unless Jonas explicitly asks for code).
 
+Do not roleplay movie Tony Stark or talk about "his suit", armor, Mark suits, Stark-tech,
+arc reactors, or other Iron Man fanfic props. Sound like a helpful holographic assistant —
+not a character cosplay.
+
 Use tools only for real Mac actions / live data. Never invent weather, time, notes, clipboard,
-calendar, files, search, stocks, system status, or memories.
+calendar, files, search, stocks, system status, screen contents, or memories.
 
 Memory: a "## Long-term memory" note is injected each turn — answer personal facts from it directly
 (no recall unless searching). Call remember/forget/list_memories when asked to store or change facts.
@@ -76,6 +96,10 @@ never before calling a tool. If Jonas greets without a task, answer once and bri
 
 Tone: report status crisply ("Done." / "Working." / "Of course."). Skip filler, disclaimers, and
 enthusiasm. Wit should land in a single dry beat, then stop.
+
+Screen: when Jonas asks what is on his screen, what he is looking at, to describe/see/observe the
+display, or needs help with something visible ("help with this", "what is this"), call see_screen
+first — never invent what is on screen.
 
 Coder: Coder is Jonas's Grok Bot coding assistant (local reverse bridge). When the user mentions
 Coder or wants to ask/tell/talk to/message/ping Coder, you MUST call ask_coder immediately with
@@ -314,6 +338,19 @@ TOOLS: list[dict[str, Any]] = [
     {
         "type": "function",
         "function": {
+            "name": "see_screen",
+            "description": (
+                "Capture the main display and return a concise plain-language description of what "
+                "Jonas is looking at (active app + visible content). Use when he asks what is on "
+                "screen, what he is looking at, to see/describe/observe the display, or needs help "
+                "with something visible ('help with this'). Do not invent screen contents."
+            ),
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "list_running_apps",
             "description": "Lists names of visible running applications (capped).",
             "parameters": {"type": "object", "properties": {}, "required": []},
@@ -467,7 +504,7 @@ TOOLS: list[dict[str, Any]] = [
         "function": {
             "name": "daily_briefing",
             "description": (
-                "Iron Man-style morning briefing: time, system status, today's calendar, optional "
+                "Morning briefing: time, system status, today's calendar, optional "
                 "weather, and GitHub status — one structured JSON to narrate. Use for good morning / "
                 "brief me / status report."
             ),
@@ -1278,6 +1315,169 @@ def tool_take_screenshot(args: dict[str, Any]) -> str:
     if not dest.is_file():
         return json.dumps({"ok": False, "error": "screencapture reported ok but file missing", "path": str(dest)})
     return json.dumps({"ok": True, "path": str(dest)})
+
+
+
+def _list_ollama_model_names() -> list[str]:
+    try:
+        with httpx.Client(timeout=5.0) as client:
+            r = client.get(f"{OLLAMA_HOST}/api/tags")
+            r.raise_for_status()
+            data = r.json()
+    except Exception:  # noqa: BLE001
+        return []
+    names: list[str] = []
+    for m in data.get("models") or []:
+        name = (m.get("name") or "").strip()
+        if name:
+            names.append(name)
+    return names
+
+
+def _resolve_vision_model() -> str | None:
+    """Pick a local Ollama vision model (llava / moondream / …). Cached after first lookup."""
+    global _VISION_MODEL_CACHE
+    if JARVIS_VISION_MODEL:
+        return JARVIS_VISION_MODEL
+    if _VISION_MODEL_CACHE is not False:
+        return _VISION_MODEL_CACHE if isinstance(_VISION_MODEL_CACHE, str) else None
+    names = _list_ollama_model_names()
+    if not names:
+        _VISION_MODEL_CACHE = None
+        return None
+    lower_map = {n.lower(): n for n in names}
+    chosen: str | None = None
+    for cand in _VISION_PREFERRED:
+        if cand.lower() in lower_map:
+            chosen = lower_map[cand.lower()]
+            break
+    if chosen is None:
+        # Fuzzy: any installed name whose base looks vision-capable.
+        for n in names:
+            base = n.split(":", 1)[0].lower()
+            if any(
+                k in base
+                for k in ("llava", "moondream", "minicpm", "qwen2-vl", "bakllava", "vision")
+            ):
+                chosen = n
+                break
+    _VISION_MODEL_CACHE = chosen
+    return chosen
+
+
+def _capture_main_display(dest: Path) -> dict[str, Any]:
+    """Silent full-display capture via macOS screencapture. Returns ok/error dict."""
+    if platform.system() != "Darwin":
+        return {"ok": False, "error": "see_screen is macOS-only (screencapture)"}
+    bin_path = "/usr/sbin/screencapture"
+    if not Path(bin_path).is_file():
+        bin_path = "/usr/bin/screencapture"
+    try:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        return {"ok": False, "error": f"cannot create capture dir: {e}"}
+    # -x silent, -m main monitor when multiple displays are present.
+    argv = [bin_path, "-x", "-m", str(dest)]
+    try:
+        code, out, err = _run_cmd(argv, timeout=30.0)
+    except FileNotFoundError:
+        return {"ok": False, "error": "screencapture not found"}
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "error": "screencapture timed out"}
+    except OSError as e:
+        return {"ok": False, "error": str(e)}
+    if code != 0:
+        # Older macOS may not support -m; retry without it.
+        try:
+            code, out, err = _run_cmd([bin_path, "-x", str(dest)], timeout=30.0)
+        except Exception as e:  # noqa: BLE001
+            return {"ok": False, "error": str(e)}
+        if code != 0:
+            return {"ok": False, "error": err or out or "screencapture failed", "returncode": code}
+    if not dest.is_file() or dest.stat().st_size < 32:
+        return {"ok": False, "error": "screencapture produced no image"}
+    return {"ok": True, "path": str(dest), "bytes": dest.stat().st_size}
+
+
+def _describe_image_ollama(image_path: Path, model: str) -> dict[str, Any]:
+    """Ask a local vision model for a short spoken description. Does not log pixels."""
+    try:
+        raw = image_path.read_bytes()
+    except OSError as e:
+        return {"ok": False, "error": f"cannot read capture: {e}"}
+    b64 = base64.b64encode(raw).decode("ascii")
+    prompt = (
+        "Describe this macOS screen in 1-3 short spoken sentences for a voice assistant. "
+        "Name the frontmost app if clear, and summarize the main visible content. "
+        "Plain language only — no markdown, no bullet lists, no speculation about hidden data."
+    )
+    payload = {
+        "model": model,
+        "messages": [
+            {
+                "role": "user",
+                "content": prompt,
+                "images": [b64],
+            }
+        ],
+        "stream": False,
+        "keep_alive": KEEP_ALIVE,
+        "options": {"num_predict": 180, "temperature": 0.1},
+    }
+    try:
+        with httpx.Client(timeout=120.0) as client:
+            r = client.post(f"{OLLAMA_HOST}/api/chat", json=payload)
+            r.raise_for_status()
+            data = r.json()
+    except httpx.HTTPError as e:
+        return {"ok": False, "error": f"vision model error: {e}"}
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "error": f"vision model error: {type(e).__name__}: {e}"}
+    msg = (data.get("message") or {}) if isinstance(data, dict) else {}
+    content = (msg.get("content") or "").strip()
+    if not content:
+        return {"ok": False, "error": "vision model returned empty description", "model": model}
+    # Light cleanup for TTS.
+    content = re.sub(r"\s+", " ", content).strip()
+    content = re.sub(r"[#*_`]+", "", content)
+    if len(content) > SEE_SCREEN_MAX_CHARS:
+        content = content[: SEE_SCREEN_MAX_CHARS - 1].rstrip() + "…"
+    return {"ok": True, "description": content, "model": model}
+
+
+def tool_see_screen(_: dict[str, Any]) -> str:
+    """Capture the main display and describe it via a local Ollama vision model."""
+    model = _resolve_vision_model()
+    if not model:
+        return json.dumps(
+            {
+                "ok": False,
+                "error": (
+                    "No local vision model found. Install one with "
+                    "`ollama pull llava` or `ollama pull moondream`, "
+                    "or set JARVIS_VISION_MODEL."
+                ),
+            }
+        )
+    dest = SCREEN_CAPTURE_PATH
+    cap = _capture_main_display(dest)
+    if not cap.get("ok"):
+        return json.dumps(cap)
+    desc = _describe_image_ollama(dest, model)
+    # Best-effort cleanup of ephemeral capture (ignore errors).
+    try:
+        dest.unlink(missing_ok=True)
+    except OSError:
+        pass
+    if not desc.get("ok"):
+        return json.dumps(desc)
+    return json.dumps(
+        {
+            "ok": True,
+            "description": desc["description"],
+            "model": desc.get("model") or model,
+        }
+    )
 
 
 def tool_list_running_apps(_: dict[str, Any]) -> str:
@@ -2224,6 +2424,7 @@ TOOL_DISPATCH = {
     "create_reminder": tool_create_reminder,
     "music_control": tool_music_control,
     "take_screenshot": tool_take_screenshot,
+    "see_screen": tool_see_screen,
     "list_running_apps": tool_list_running_apps,
     "read_file": tool_read_file,
     "web_search": tool_web_search,
@@ -2356,6 +2557,7 @@ _ACTION_INTENT_RE = re.compile(
     r"\b(?:timer|countdown)\b|"
     r"\b(?:volume|mute|unmute)\b|"
     r"\b(?:screenshot|screen\s*shot)\b|"
+    r"\b(?:what(?:'s|s| is)\s+on\s+(?:my\s+|the\s+)?screen|what\s+am\s+i\s+looking\s+at|(?:see|describe|observe|look\s+at)\s+(?:my\s+|the\s+)?screen|can\s+you\s+see\s+(?:my\s+|the\s+)?screen|help\s+with\s+this)\b|"
     r"\b(?:github|pull\s+requests?)\b|"
     r"\b(?:clipboard)\b|"
     r"\b(?:read\s+(?:the\s+)?file|list\s+(?:notes|files|running\s+apps))\b|"
@@ -2418,6 +2620,30 @@ def is_personal_memory_question(text: str) -> bool:
     return bool(_PERSONAL_MEMORY_RE.match(t))
 
 
+
+# Clear "look at my screen" asks — force see_screen (no LLM preamble).
+_SCREEN_SEE_RE = re.compile(
+    r"^(?:"
+    r"what(?:'s|s| is)\s+on\s+(?:my\s+|the\s+)?screen|"
+    r"what\s+am\s+i\s+looking\s+at|"
+    r"(?:please\s+)?(?:see|describe|observe|look\s+at)\s+(?:my\s+|the\s+)?screen|"
+    r"can\s+you\s+see\s+(?:my\s+|the\s+)?screen|"
+    r"tell\s+me\s+what(?:'s|s| is)\s+on\s+(?:my\s+|the\s+)?screen|"
+    r"look\s+at\s+(?:this|my\s+screen)|"
+    r"observe\s+(?:this|my\s+screen)"
+    r")[\s!.?]*$",
+    re.IGNORECASE,
+)
+
+
+def wants_screen_see(text: str) -> bool:
+    """True when the user clearly wants a live screen description."""
+    t = (text or "").strip()
+    if not t or len(t) > 80:
+        return False
+    return bool(_SCREEN_SEE_RE.match(t))
+
+
 _CODER_MENTION_RE = re.compile(r"\bcoder\b", re.IGNORECASE)
 
 
@@ -2460,6 +2686,8 @@ def needs_tools(text: str) -> bool:
     if is_personal_memory_question(t):
         return False
     if _BRIEFING_RE.match(t):
+        return True
+    if wants_screen_see(t):
         return True
     return looks_like_action_intent(t)
 
@@ -2570,11 +2798,17 @@ def _format_direct_tool_reply(name: str, result: str) -> str | None:
             line += f" ({chg:+.2f}%)" if isinstance(chg, (int, float)) else f" ({chg})"
         return line + "."
 
+    if name == "see_screen":
+        desc = str(data.get("description") or "").strip()
+        if not desc:
+            return None
+        return desc if desc.endswith((".", "!", "?")) else desc + "."
+
     return None
 
 
 _DIRECT_REPLY_TOOLS = frozenset(
-    {"get_weather", "get_current_time", "get_system_status", "stock_quote"}
+    {"get_weather", "get_current_time", "get_system_status", "stock_quote", "see_screen"}
 )
 
 
@@ -2688,6 +2922,11 @@ def chat_round(
         name = func.get("name") or ""
         arguments = func.get("arguments")
         tool_id = call.get("id") if isinstance(call, dict) else None
+        if name == "see_screen" and on_token is not None:
+            try:
+                on_token("Observing.")
+            except Exception:  # noqa: BLE001
+                pass
         result = run_tool(name, arguments)
         tool_msg: dict[str, Any] = {
             "role": "tool",
@@ -2803,6 +3042,56 @@ def _format_ask_coder_reply(tool_json: str) -> str:
     return f"Coder unavailable. {err}"
 
 
+
+def _force_see_screen_turn(
+    messages: list[dict[str, Any]],
+    user_text: str,
+    *,
+    on_token: Any | None = None,
+) -> tuple[list[dict[str, Any]], str]:
+    """Capture + describe the screen immediately — no LLM preamble."""
+    state = list(messages)
+    if on_token is not None:
+        try:
+            on_token("Observing.")
+        except Exception:  # noqa: BLE001
+            pass
+    result = tool_see_screen({})
+    state.append(
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "see_screen_forced",
+                    "type": "function",
+                    "function": {"name": "see_screen", "arguments": {}},
+                }
+            ],
+        }
+    )
+    state.append({"role": "tool", "name": "see_screen", "content": result})
+    direct = _format_direct_tool_reply("see_screen", result)
+    if direct:
+        reply = direct
+    else:
+        try:
+            data = json.loads(result)
+        except (json.JSONDecodeError, TypeError):
+            data = {}
+        err = ""
+        if isinstance(data, dict):
+            err = str(data.get("error") or "").strip()
+        reply = f"I could not see the screen. {err}".strip() if err else "I could not see the screen."
+    state.append({"role": "assistant", "content": reply, "tool_calls": None})
+    if on_token is not None and reply:
+        try:
+            on_token(reply)
+        except Exception:  # noqa: BLE001
+            pass
+    return state, reply
+
+
 def _force_ask_coder_turn(
     messages: list[dict[str, Any]],
     user_text: str,
@@ -2869,6 +3158,9 @@ def run_turn(
     # Coder mentions → ask_coder immediately (skip LLM greeting / tool-decision stall).
     if mentions_coder(last_user):
         return _force_ask_coder_turn(state, last_user, on_token=on_token)
+    # Clear screen asks → see_screen immediately (HUD OBSERVING).
+    if wants_screen_see(last_user):
+        return _force_see_screen_turn(state, last_user, on_token=on_token)
 
     if not use_tools:
         state, text = chat_round(

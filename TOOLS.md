@@ -19,6 +19,7 @@ All tools return JSON strings. The model must call tools rather than invent resu
 | `create_reminder` | `text`, optional `due` | macOS Reminders; freeform due appended to body |
 | `music_control` | `action` | `play`/`pause`/`next`/`previous`/`status` — Music.app then Spotify |
 | `take_screenshot` | optional `path` | `screencapture -x`; path must resolve under home |
+| `see_screen` | — | Capture main display + local Ollama vision (`llava`/`moondream`/…); concise spoken description. Override model with `JARVIS_VISION_MODEL` |
 | `list_running_apps` | — | Visible app process names (capped ~40) |
 | `read_file` | `path`, optional `max_bytes` | Text under home only; utf-8 replace; truncated flag |
 | `web_search` | `query` | DuckDuckGo Instant Answer API (no key); abstract + up to 5 related |
@@ -36,6 +37,26 @@ All tools return JSON strings. The model must call tools rather than invent resu
 | `forget` | `id` **or** `text` (exact) | Delete one memory; returns ok/not found |
 | `ask_coder` | `message` | POST handoff to shared room `127.0.0.1:8767` + SSE wait for explicit coder reply (see ROOM.md) |
 
+
+
+## Screen awareness
+
+`see_screen` captures the main display (`screencapture -x -m` → `/tmp/jarvis-screen.png`) and
+asks a local Ollama vision model for a short plain-language description (active app + visible
+content). Clear phrases like "what's on my screen?" force the tool with no preamble; the HUD
+chip shows `OBSERVING` while it runs.
+
+Requires a vision model, e.g. `ollama pull llava` (already preferred if installed). Ephemeral
+capture is deleted after describe; description text is not written to debug logs beyond length.
+
+Example phrases:
+
+```text
+what's on my screen?
+what am I looking at?
+describe my screen
+help with this
+```
 
 ## Long-term memory
 
@@ -76,6 +97,7 @@ python jarvis.py
 # You › notify me title Hello message World
 # You › good morning          # → daily_briefing
 # You › brief me
+# You › what's on my screen?
 # You › stock quote AAPL
 # You › set a 5 minute timer for tea
 ```

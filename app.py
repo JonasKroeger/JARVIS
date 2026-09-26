@@ -63,13 +63,15 @@ except ImportError:
 SAMPLE_RATE = 16000
 
 VOICE_HINT = (
-    "Spoken path: answer like movie JARVIS — calm, precise, dry wit; never chatty "
-    "or sycophantic. Prefer one or two short sentences. No emoji, markdown, bullets, "
-    "or code fences unless Jonas asks for code. Address Jonas by name when useful; "
-    "occasional 'sir' is fine, not every line. Finish every sentence. "
+    "Spoken path: calm, precise, dry wit; never chatty or sycophantic. Prefer one or "
+    "two short sentences. No emoji, markdown, bullets, or code fences unless Jonas "
+    "asks for code. Address Jonas by name when useful; occasional 'sir' is fine, not "
+    "every line. Finish every sentence. Do not talk about suits, armor, Mark suits, "
+    "or Stark-tech fanfic — holographic assistant, not cosplay. "
     "Never open with canned lines like 'Hello, how can I assist you?' — not at "
     "session start and never before a tool call. A bare greeting → one clipped beat "
-    "('Evening.' / 'Yes?' / 'Ready.'). Mentions of Coder → ask_coder with no preamble."
+    "('Evening.' / 'Yes?' / 'Ready.'). Mentions of Coder → ask_coder with no preamble. "
+    "Screen / looking-at / help-with-this asks → see_screen first."
 )
 
 _DEBUG_LOG = Path(__file__).resolve().parent / "jarvis-debug.log"
@@ -241,6 +243,8 @@ class JarvisWindow(QMainWindow):
         lower = text.lower()
         if "listening" in lower:
             display = "LISTENING"
+        elif "observ" in lower or "scanning" in lower:
+            display = "OBSERVING"
         elif "synthesiz" in lower or "formulat" in lower:
             display = "FORMULATING"
         elif "contacting" in lower or "relaying" in lower:
@@ -394,8 +398,11 @@ class JarvisWindow(QMainWindow):
         if not self._stream_active:
             self._stream_active = True
             self._stream_buf = ""
-            if "contacting coder" in delta.lower():
+            low = delta.lower()
+            if "contacting coder" in low:
                 self._set_status("RELAY")
+            elif "observ" in low or "scanning" in low:
+                self._set_status("OBSERVING")
             else:
                 self._set_status("FORMULATING")
         self._stream_buf += delta

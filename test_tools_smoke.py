@@ -185,6 +185,28 @@ class ToolSmokeTests(unittest.TestCase):
         self.assertFalse(data.get("ok", True))
         self.assertIn("home", data["error"])
 
+    def test_see_screen_non_darwin(self) -> None:
+        with patch("jarvis.platform.system", return_value="Linux"):
+            data = json.loads(jarvis.tool_see_screen({}))
+        self.assertFalse(data.get("ok", True))
+        self.assertIn("macOS", data.get("error", ""))
+
+    def test_see_screen_no_vision_model(self) -> None:
+        with (
+            patch("jarvis.platform.system", return_value="Darwin"),
+            patch("jarvis._resolve_vision_model", return_value=None),
+        ):
+            data = json.loads(jarvis.tool_see_screen({}))
+        self.assertFalse(data.get("ok", True))
+        self.assertIn("vision", data.get("error", "").lower())
+
+    def test_format_see_screen_direct(self) -> None:
+        reply = jarvis._format_direct_tool_reply(
+            "see_screen",
+            json.dumps({"ok": True, "description": "Safari showing example.com", "model": "llava"}),
+        )
+        self.assertEqual(reply, "Safari showing example.com.")
+
     @unittest.skipUnless(platform.system() != "Darwin", "non-Darwin path")
     def test_list_running_apps_non_darwin(self) -> None:
         data = json.loads(jarvis.tool_list_running_apps({}))
@@ -538,6 +560,13 @@ class ToolSmokeTests(unittest.TestCase):
         self.assertTrue(jarvis.needs_tools("tell coder to fix the bug"))
         self.assertTrue(jarvis.needs_tools("message coder please"))
         self.assertTrue(jarvis.needs_tools("ping coder"))
+        # Screen awareness
+        self.assertTrue(jarvis.needs_tools("what's on my screen?"))
+        self.assertTrue(jarvis.needs_tools("what am I looking at"))
+        self.assertTrue(jarvis.needs_tools("help with this"))
+        self.assertTrue(jarvis.wants_screen_see("what's on my screen?"))
+        self.assertTrue(jarvis.wants_screen_see("describe my screen"))
+        self.assertFalse(jarvis.wants_screen_see("help with this"))  # model-routed, not forced
         self.assertTrue(jarvis.mentions_coder("hello coder"))
         self.assertTrue(jarvis.mentions_coder("ask Coder to ship it"))
         self.assertFalse(jarvis.mentions_coder("encoder settings"))
