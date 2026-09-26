@@ -417,7 +417,7 @@ def _build_brain(seed: int = 42) -> _BrainGraph:
 
     # Rejection-sample nodes inside brain volume
     attempts = 0
-    while len(nodes) < 78 and attempts < 4000:
+    while len(nodes) < 52 and attempts < 3000:
         attempts += 1
         x = rng.uniform(-1.05, 1.05)
         y = rng.uniform(-0.72, 0.72)
@@ -438,7 +438,7 @@ def _build_brain(seed: int = 42) -> _BrainGraph:
         too_close = False
         for n in nodes:
             dx, dy, dz = n.x - x, n.y - y, n.z - z
-            if dx * dx + dy * dy + dz * dz < 0.045:
+            if dx * dx + dy * dy + dz * dz < 0.055:
                 too_close = True
                 break
         if too_close:
@@ -467,7 +467,7 @@ def _build_brain(seed: int = 42) -> _BrainGraph:
     # k-NN edges + a few long-range commissural links
     edges: list[_Edge] = []
     seen: set[tuple[int, int]] = set()
-    k = 4
+    k = 3
     for i, ni in enumerate(nodes):
         dists: list[tuple[float, int]] = []
         for j, nj in enumerate(nodes):
@@ -490,7 +490,7 @@ def _build_brain(seed: int = 42) -> _BrainGraph:
     # Explicit corpus callosum bridges
     left = [i for i, n in enumerate(nodes) if n.x < -0.12]
     right = [i for i, n in enumerate(nodes) if n.x > 0.12]
-    for _ in range(10):
+    for _ in range(6):
         if not left or not right:
             break
         a = rng.choice(left)
@@ -542,7 +542,7 @@ class OrbVisualizer(QWidget):
 
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._tick)
-        self._timer.start(16)  # ~60 fps
+        self._timer.start(33)  # ~30 fps — GPU-light on MacBook
 
     def set_state(self, state: str) -> None:
         self._state = state or self.IDLE
@@ -559,7 +559,7 @@ class OrbVisualizer(QWidget):
         return 0.55, 0.55, 0.45
 
     def _tick(self) -> None:
-        dt = 0.016
+        dt = 0.033
         # Gentle idle spin + bob
         spin = {
             self.IDLE: 0.18,
@@ -590,8 +590,8 @@ class OrbVisualizer(QWidget):
             self._graph.nodes[e.b].flash = max(self._graph.nodes[e.b].flash, 0.55)
 
         # Cap pulse count for perf
-        if len(self._pulses) > 48:
-            self._pulses = self._pulses[-48:]
+        if len(self._pulses) > 28:
+            self._pulses = self._pulses[-28:]
 
         alive: list[_Pulse] = []
         for p in self._pulses:
@@ -751,7 +751,7 @@ class OrbVisualizer(QWidget):
             path = QPainterPath()
             s0 = self._project(*p0, cx, cy, scale)
             path.moveTo(s0[0], s0[1])
-            samples = 8
+            samples = 5
             for s in range(1, samples + 1):
                 t = s / samples
                 bx, by, bz = self._bezier(p0, p1, p2, t)
@@ -769,31 +769,31 @@ class OrbVisualizer(QWidget):
             painter.setBrush(Qt.BrushStyle.NoBrush)
             painter.drawPath(path)
 
-        # Traveling synapse pulses
+        # Traveling synapse pulses (single glow + short trail)
+        painter.setPen(Qt.PenStyle.NoPen)
         for p in self._pulses:
             e = edges[p.edge]
             na, nb = nodes[e.a], nodes[e.b]
             p0, p1, p2 = self._axon_points(na.x, na.y, na.z, nb.x, nb.y, nb.z, e.curl)
             bx, by, bz = self._bezier(p0, p1, p2, p.t)
             sx, sy, depth = self._project(bx, by, bz, cx, cy, scale)
-            # Soft trail behind pulse
-            for trail in (0.08, 0.04, 0.0):
-                tt = max(0.0, p.t - trail)
-                tx, ty, tz = self._bezier(p0, p1, p2, tt)
+            pr = (3.4 + 2.0 * p.bright) * (0.7 + 0.3 * depth)
+            g = QRadialGradient(QPointF(sx, sy), pr * 3.0)
+            core = QColor(200, 250, 255)
+            core.setAlpha(_a(230 * p.bright * intensity))
+            mid = QColor(122, 232, 255)
+            mid.setAlpha(_a(100 * p.bright * intensity))
+            g.setColorAt(0.0, core)
+            g.setColorAt(0.4, mid)
+            g.setColorAt(1.0, QColor(0, 0, 0, 0))
+            painter.setBrush(g)
+            painter.drawEllipse(QPointF(sx, sy), pr * 2.6, pr * 2.6)
+            # short dim trail
+            if p.t > 0.06:
+                tx, ty, tz = self._bezier(p0, p1, p2, p.t - 0.06)
                 tsx, tsy, _ = self._project(tx, ty, tz, cx, cy, scale)
-                fade = 1.0 - trail * 8
-                pr = (3.2 + 2.2 * p.bright) * (0.7 + 0.3 * depth) * fade
-                g = QRadialGradient(QPointF(tsx, tsy), pr * 3.2)
-                core = QColor(200, 250, 255)
-                core.setAlpha(_a(220 * p.bright * intensity * fade))
-                mid = QColor(122, 232, 255)
-                mid.setAlpha(_a(110 * p.bright * intensity * fade))
-                g.setColorAt(0.0, core)
-                g.setColorAt(0.4, mid)
-                g.setColorAt(1.0, QColor(0, 0, 0, 0))
-                painter.setPen(Qt.PenStyle.NoPen)
-                painter.setBrush(g)
-                painter.drawEllipse(QPointF(tsx, tsy), pr * 2.8, pr * 2.8)
+                painter.setBrush(QColor(122, 232, 255, _a(70 * p.bright * intensity)))
+                painter.drawEllipse(QPointF(tsx, tsy), pr * 0.9, pr * 0.9)
 
         # Nodes back-to-front
         order = sorted(range(len(nodes)), key=lambda i: proj[i][2])
