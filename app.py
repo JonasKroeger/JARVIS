@@ -11,7 +11,9 @@ from __future__ import annotations
 import os
 import sys
 import threading
+import traceback
 from datetime import datetime
+from pathlib import Path
 
 import httpx
 import numpy as np
@@ -66,6 +68,23 @@ VOICE_HINT = (
     "Avoid markdown, bullet lists, and code blocks unless they ask for code — "
     "your answer may be read aloud."
 )
+
+# Crash/debug trail (also mirrored by run.command stdout/stderr redirect)
+_DEBUG_LOG = Path(__file__).resolve().parent / "jarvis-debug.log"
+
+
+def _debug_log(msg: str, exc: BaseException | None = None) -> None:
+    """Append a line (and optional traceback) to jarvis-debug.log. Never raises."""
+    try:
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        lines = [f"[{ts}] {msg}"]
+        if exc is not None:
+            lines.append("".join(traceback.format_exception(type(exc), exc, exc.__traceback__)))
+        with open(_DEBUG_LOG, "a", encoding="utf-8") as f:
+            f.write("\n".join(lines) + "\n")
+            f.flush()
+    except Exception:  # noqa: BLE001
+        pass
 
 
 class JarvisWindow(QMainWindow):
@@ -348,13 +367,23 @@ class JarvisWindow(QMainWindow):
         self._ready_status = "SYS // OLLAMA READY"
         self._set_status(self._ready_status)
         # Warm the model so the first user message is not a cold load.
+        # Own httpx.Client — httpx.Client is not thread-safe; never share with UI/worker.
         model = self._model
 
         def _warm() -> None:
+            client = None
             try:
-                warmup_model(self._client, model)
-            except Exception:  # noqa: BLE001
-                pass
+                client = httpx.Client(timeout=120.0)
+                warmup_model(client, model)
+                _debug_log(f"warmup ok model={model!r}")
+            except Exception as e:  # noqa: BLE001
+                _debug_log(f"warmup failed model={model!r}", e)
+            finally:
+                if client is not None:
+                    try:
+                        client.close()
+                    except Exception:  # noqa: BLE001
+                        pass
 
         threading.Thread(target=_warm, daemon=True).start()
 
@@ -408,7 +437,8 @@ class JarvisWindow(QMainWindow):
         self._stream_buf = ""
         self._set_status("SYS // THINKING")
 
-        self._worker = OllamaWorker(self._client, self._model, self._messages, text, self)
+        # Pass a snapshot of messages; worker owns its httpx.Client (not thread-safe to share).
+        self._worker = OllamaWorker(self._model, list(self._messages), text, self)
         self._worker.token.connect(self._on_ollama_token)
         self._worker.finished_ok.connect(self._on_ollama_ok)
         self._worker.finished_err.connect(self._on_ollama_err)
@@ -433,20 +463,27 @@ class JarvisWindow(QMainWindow):
         self._chat.append(html)
 
     def _on_ollama_token(self, delta: str) -> None:
+        """Main-thread slot (QueuedConnection). self._chat is a QTextEdit."""
         if not delta:
             return
-        if not self._stream_active:
-            self._stream_active = True
+        try:
+            if not self._stream_active:
+                self._stream_active = True
+                self._stream_buf = ""
+                self._begin_assistant_stream()
+                self._set_status("SYS // SYNTHESIZING")
+            self._stream_buf += delta
+            cursor = self._chat.textCursor()
+            cursor.movePosition(QTextCursor.MoveOperation.End)
+            # Insert as plain text (deltas are raw model tokens)
+            cursor.insertText(delta)
+            self._chat.setTextCursor(cursor)
+            self._chat.ensureCursorVisible()
+        except Exception as e:  # noqa: BLE001 — never let UI update kill the process
+            _debug_log("stream UI insert failed; will show full reply on finish", e)
+            # Disable further live inserts this turn; finished_ok will append full reply.
+            self._stream_active = False
             self._stream_buf = ""
-            self._begin_assistant_stream()
-            self._set_status("SYS // SYNTHESIZING")
-        self._stream_buf += delta
-        cursor = self._chat.textCursor()
-        cursor.movePosition(QTextCursor.MoveOperation.End)
-        # Insert as plain text (deltas are raw model tokens)
-        cursor.insertText(delta)
-        self._chat.setTextCursor(cursor)
-        self._chat.ensureCursorVisible()
 
     def _on_ollama_ok(self, msgs: list, reply: str) -> None:
         self._messages = msgs
@@ -579,32 +616,42 @@ class OllamaWorker(QThread):
 
     def __init__(
         self,
-        client: httpx.Client,
         model: str,
         messages: list[dict],
         user_text: str,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
-        self._client = client
         self._model = model
-        self._messages = messages
+        # Snapshot only — never mutate the GUI thread's list from this QThread.
+        self._messages = list(messages)
         self._user_text = user_text
 
     def run(self) -> None:
+        client: httpx.Client | None = None
         try:
-            self._messages.append({"role": "user", "content": self._user_text})
+            # httpx.Client is not thread-safe; each worker owns its own client.
+            client = httpx.Client(timeout=180.0)
+            messages = list(self._messages)
+            messages.append({"role": "user", "content": self._user_text})
 
             def _on_token(delta: str) -> None:
                 if delta:
                     self.token.emit(delta)
 
             msgs, reply = run_turn(
-                self._client, self._model, self._messages, on_token=_on_token
+                client, self._model, messages, on_token=_on_token
             )
-            self.finished_ok.emit(msgs, reply)
+            self.finished_ok.emit(msgs, reply or "")
         except Exception as e:  # noqa: BLE001
-            self.finished_err.emit(str(e))
+            _debug_log("OllamaWorker.run failed", e)
+            self.finished_err.emit(f"{type(e).__name__}: {e}")
+        finally:
+            if client is not None:
+                try:
+                    client.close()
+                except Exception:  # noqa: BLE001
+                    pass
 
 
 class TranscribeWorker(QThread):
@@ -632,16 +679,28 @@ class TranscribeWorker(QThread):
 
 
 def main() -> None:
+    os.environ.setdefault("PYTHONUNBUFFERED", "1")
+    _debug_log(
+        f"JARVIS starting pid={os.getpid()} platform={sys.platform} "
+        f"python={sys.version.split()[0]} log={_DEBUG_LOG}"
+    )
     if sys.platform != "darwin" and not os.environ.get("ELEVENLABS_API_KEY"):
         print("Note: TTS uses ElevenLabs (set ELEVENLABS_API_KEY) or macOS `say`.")
     # High-DPI awareness for crisp HUD painting
     os.environ.setdefault("QT_ENABLE_HIGHDPI_SCALING", "1")
-    app = QApplication(sys.argv)
-    app.setApplicationName("JARVIS")
-    app.setStyle("Fusion")  # avoid native grey chrome leaking through
-    win = JarvisWindow()
-    win.show()
-    sys.exit(app.exec())
+    try:
+        app = QApplication(sys.argv)
+        app.setApplicationName("JARVIS")
+        app.setStyle("Fusion")  # avoid native grey chrome leaking through
+        win = JarvisWindow()
+        win.show()
+        _debug_log("JARVIS window shown; entering event loop")
+        code = app.exec()
+        _debug_log(f"JARVIS event loop exited code={code}")
+        sys.exit(code)
+    except Exception as e:  # noqa: BLE001
+        _debug_log("JARVIS main() crashed", e)
+        raise
 
 
 if __name__ == "__main__":

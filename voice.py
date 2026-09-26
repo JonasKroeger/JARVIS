@@ -176,20 +176,29 @@ def speak_async(text: str, on_done: Callable[[], None] | None = None) -> None:
     ElevenLabs failure) falls back to macOS `/usr/bin/say`.
     Spoken text is truncated (~ELEVENLABS_MAX_CHARS) so synthesis starts sooner;
     the full reply remains in the chat UI.
+
+    Exceptions in the TTS thread are swallowed so they cannot kill the process.
     """
 
     def run() -> None:
-        safe = _truncate_for_tts(text_for_speech(text))
-        if len(safe) > 32000:
-            safe = safe[:32000] + "…"
-        api_key = _elevenlabs_api_key()
-        used_el = False
-        if api_key:
-            used_el = _speak_via_elevenlabs(safe, api_key)
-        if not used_el:
-            _speak_via_say(safe)
-        if on_done:
-            on_done()
+        try:
+            safe = _truncate_for_tts(text_for_speech(text))
+            if len(safe) > 32000:
+                safe = safe[:32000] + "…"
+            api_key = _elevenlabs_api_key()
+            used_el = False
+            if api_key:
+                used_el = _speak_via_elevenlabs(safe, api_key)
+            if not used_el:
+                _speak_via_say(safe)
+        except Exception:  # noqa: BLE001 — never let TTS kill the GUI process
+            pass
+        finally:
+            if on_done:
+                try:
+                    on_done()
+                except Exception:  # noqa: BLE001
+                    pass
 
     threading.Thread(target=run, daemon=True).start()
 
