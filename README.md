@@ -58,3 +58,5 @@ Notes are stored under `~/.jarvis/notes/`.
 ## Tools
 
 See [TOOLS.md](TOOLS.md) for the full tool list (time, notes, browser, apps, clipboard, weather, GitHub).
+
+JARVIS also auto-loads `ELEVENLABS_*` from `~/JARVIS/.env` or `~/.jarvis/.env` if those files exist.

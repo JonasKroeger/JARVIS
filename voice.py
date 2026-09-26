@@ -36,6 +36,31 @@ def text_for_speech(text: str) -> str:
     return t.strip() or " "
 
 
+def _load_env_files() -> None:
+    """Load KEY=VALUE from ~/.jarvis/.env and project .env without overriding existing env."""
+    candidates = [
+        Path.home() / ".jarvis" / ".env",
+        Path(__file__).resolve().parent / ".env",
+    ]
+    for path in candidates:
+        if not path.is_file():
+            continue
+        try:
+            for line in path.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                k, _, v = line.partition("=")
+                k, v = k.strip(), v.strip().strip('"').strip("'")
+                if k and k not in os.environ:
+                    os.environ[k] = v
+        except OSError:
+            continue
+
+
+_load_env_files()
+
+
 def _elevenlabs_api_key() -> str | None:
     key = os.environ.get("ELEVENLABS_API_KEY", "").strip()
     return key or None
