@@ -3,6 +3,10 @@ __pycache__/
 *.py[cod]
 .DS_Store
 jarvis-debug.log
+coder-bridge.log
+coder_bridge.pid
+coder_bridge/inbox/*.json
+coder_bridge/outbox/*.json
 .env
 jarvis.pid
 piper/voices/

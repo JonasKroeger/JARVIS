@@ -34,6 +34,7 @@ All tools return JSON strings. The model must call tools rather than invent resu
 | `recall` | optional `query` | Search memory (case-insensitive on text/tags, top 10); no query → newest 15 |
 | `list_memories` | optional `limit` (default 20) | Newest memories first |
 | `forget` | `id` **or** `text` (exact) | Delete one memory; returns ok/not found |
+| `ask_coder` | `message` | POST to local Coder mailbox `127.0.0.1:8766` (reverse bridge); needs `coder_bridge_server` + worker |
 
 
 ## Long-term memory

@@ -536,6 +536,28 @@ TOOLS: list[dict[str, Any]] = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "ask_coder",
+            "description": (
+                "Send a prompt to Coder (Grok Bot) via the local reverse bridge "
+                "mailbox on 127.0.0.1:8766 and return Coder's reply. Use when the "
+                "user wants help from Coder, coding assistance beyond local tools, "
+                "or explicitly asks to ask/tell Coder something."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "message": {
+                        "type": "string",
+                        "description": "Prompt / question for Coder.",
+                    }
+                },
+                "required": ["message"],
+            },
+        },
+    },
 ]
 
 
@@ -1978,6 +2000,46 @@ def tool_forget(args: dict[str, Any]) -> str:
 
 
 
+def tool_ask_coder(args: dict[str, Any]) -> str:
+    """POST message to local Coder mailbox (reverse bridge)."""
+    message = str(args.get("message", "")).strip()
+    if not message:
+        return json.dumps({"ok": False, "error": "message is required"})
+    if len(message) > 50_000:
+        return json.dumps({"ok": False, "error": "message too long"})
+    url = os.environ.get("CODER_URL", "http://127.0.0.1:8766/chat").strip() or (
+        "http://127.0.0.1:8766/chat"
+    )
+    api_key = os.environ.get("CODER_BRIDGE_API_KEY", "").strip() or None
+    try:
+        timeout = float(os.environ.get("CODER_BRIDGE_TIMEOUT", "120"))
+    except ValueError:
+        timeout = 120.0
+    timeout = max(5.0, min(timeout, 600.0))
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    body = {"message": message, "context": {"source": "jarvis-tool"}}
+    try:
+        with httpx.Client(timeout=timeout) as client:
+            r = client.post(url, json=body, headers=headers)
+            r.raise_for_status()
+            data = r.json()
+    except httpx.HTTPError as e:
+        return json.dumps({"ok": False, "error": f"coder bridge failed: {e}", "url": url})
+    except Exception as e:  # noqa: BLE001
+        return json.dumps({"ok": False, "error": f"{type(e).__name__}: {e}", "url": url})
+    if not isinstance(data, dict) or "reply" not in data:
+        return json.dumps({"ok": False, "error": "unexpected response", "raw": str(data)[:200]})
+    return json.dumps(
+        {
+            "ok": True,
+            "reply": str(data.get("reply") or ""),
+            "id": data.get("id"),
+        }
+    )
+
+
 TOOL_DISPATCH = {
     "get_current_time": tool_get_current_time,
     "list_notes": tool_list_notes,
@@ -2009,6 +2071,7 @@ TOOL_DISPATCH = {
     "recall": tool_recall,
     "list_memories": tool_list_memories,
     "forget": tool_forget,
+    "ask_coder": tool_ask_coder,
 }
 
 
@@ -2137,7 +2200,8 @@ _ACTION_INTENT_RE = re.compile(
     r"\b(?:running\s+apps|system\s+status|cpu\s+usage|battery\s+(?:status|level))\b|"
     r"\b(?:what(?:'s|s| is)\s+(?:the\s+)?(?:time|weather|clipboard)|what\s+time\s+is\s+it)\b|"
     r"\b(?:save\s+(?:a\s+)?note|create\s+(?:a\s+)?note|write\s+(?:a\s+)?note)\b|"
-    r"\b(?:set\s+(?:a\s+)?(?:timer|reminder|volume))\b"
+    r"\b(?:set\s+(?:a\s+)?(?:timer|reminder|volume))\b|"
+    r"\b(?:ask\s+coder|tell\s+coder|message\s+coder)\b"
     r")",
     re.IGNORECASE,
 )
