@@ -542,7 +542,7 @@ class OrbVisualizer(QWidget):
 
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._tick)
-        self._timer.start(33)  # ~30 fps — GPU-light on MacBook
+        self._timer.start(50)  # ~20 fps idle; rises when active
 
     def set_state(self, state: str) -> None:
         self._state = state or self.IDLE
@@ -559,7 +559,11 @@ class OrbVisualizer(QWidget):
         return 0.55, 0.55, 0.45
 
     def _tick(self) -> None:
-        dt = 0.033
+        # Adaptive cadence: quieter idle, snappier when talking
+        interval = 50 if self._state == self.IDLE else 33
+        if self._timer.interval() != interval:
+            self._timer.setInterval(interval)
+        dt = interval / 1000.0
         # Gentle idle spin + bob
         spin = {
             self.IDLE: 0.18,
@@ -746,28 +750,32 @@ class OrbVisualizer(QWidget):
         for ei in edge_order:
             e = edges[ei]
             na, nb = nodes[e.a], nodes[e.b]
-            p0, p1, p2 = self._axon_points(na.x, na.y, na.z, nb.x, nb.y, nb.z, e.curl)
-            # Sample quadratic for path
-            path = QPainterPath()
-            s0 = self._project(*p0, cx, cy, scale)
-            path.moveTo(s0[0], s0[1])
-            samples = 5
-            for s in range(1, samples + 1):
-                t = s / samples
-                bx, by, bz = self._bezier(p0, p1, p2, t)
-                sx, sy, _ = self._project(bx, by, bz, cx, cy, scale)
-                path.lineTo(sx, sy)
             mid_d = (proj[e.a][2] + proj[e.b][2]) * 0.5
-            base_a = 28 + 50 * mid_d
-            # Active flash if either node lit
             flash = max(na.flash, nb.flash)
+            base_a = 28 + 50 * mid_d
             base_a += flash * 90
             base_a *= 0.55 + 0.45 * intensity
             pen = QPen(_q(C_CYAN_SOFT, base_a), 1.15 + flash * 0.8)
             pen.setCapStyle(Qt.PenCapStyle.RoundCap)
             painter.setPen(pen)
             painter.setBrush(Qt.BrushStyle.NoBrush)
-            painter.drawPath(path)
+            sa = proj[e.a]
+            sb = proj[e.b]
+            if flash > 0.15:
+                # Curved axon when lit
+                p0, p1, p2 = self._axon_points(na.x, na.y, na.z, nb.x, nb.y, nb.z, e.curl)
+                path = QPainterPath()
+                s0 = self._project(*p0, cx, cy, scale)
+                path.moveTo(s0[0], s0[1])
+                for s in range(1, 5):
+                    tt = s / 4
+                    bx, by, bz = self._bezier(p0, p1, p2, tt)
+                    sx, sy, _ = self._project(bx, by, bz, cx, cy, scale)
+                    path.lineTo(sx, sy)
+                painter.drawPath(path)
+            else:
+                # Cheap straight axon when dim
+                painter.drawLine(QPointF(sa[0], sa[1]), QPointF(sb[0], sb[1]))
 
         # Traveling synapse pulses (single glow + short trail)
         painter.setPen(Qt.PenStyle.NoPen)
