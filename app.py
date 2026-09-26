@@ -11,7 +11,9 @@ Run from the JARVIS folder: python app.py
 from __future__ import annotations
 
 import atexit
+import faulthandler
 import os
+import signal
 import sys
 import threading
 import traceback
@@ -85,6 +87,30 @@ def _debug_log(msg: str, exc: BaseException | None = None) -> None:
 
 def _install_crash_hooks() -> None:
     """Log uncaught exceptions and process exit; flush always."""
+    try:
+        # Dump native/Python fatal traces into the same debug log.
+        _fh = open(_DEBUG_LOG, "a", encoding="utf-8")
+        faulthandler.enable(file=_fh, all_threads=True)
+    except Exception:  # noqa: BLE001
+        try:
+            faulthandler.enable(all_threads=True)
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _signal_log(signum, frame) -> None:  # noqa: ARG001
+        name = signal.Signals(signum).name if hasattr(signal, "Signals") else str(signum)
+        _debug_log(f"JARVIS got signal {name} ({signum})")
+        if signum in (signal.SIGINT, signal.SIGTERM):
+            raise SystemExit(128 + int(signum))
+
+    for sig in (signal.SIGTERM, signal.SIGINT, getattr(signal, "SIGHUP", None), getattr(signal, "SIGABRT", None)):
+        if sig is None:
+            continue
+        try:
+            # SIGABRT handler may not run if abort() is hard; still try.
+            signal.signal(sig, _signal_log)
+        except Exception:  # noqa: BLE001
+            pass
 
     def _excepthook(exc_type, exc, tb) -> None:
         try:
