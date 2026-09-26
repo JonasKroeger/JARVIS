@@ -10,6 +10,8 @@ source .venv/bin/activate
 pip install -r requirements.txt
 # macOS: brew install ollama && brew services start ollama
 ollama pull llama3.1:8b
+# Faster alternative (recommended for snappier replies):
+# ollama pull llama3.2
 ```
 
 ## Run (desktop first)
@@ -21,7 +23,9 @@ python app.py
 # Or double-click run.command on macOS (activates .venv if present, then app.py)
 ```
 
-The window is a frameless **cinematic HUD** (default ~1180×740). Status strip uses `SYS // OLLAMA READY`, `SYS // THINKING`, `SYS // LISTENING`, `SYS // SPEAKING`. Left side is a multi-layer pulse/radar; right side stacks transcript + transmit bar. Telemetry shows `EL REQ // N` whenever TTS/`speak_async` is invoked. Startup fails fast if the model is missing (suggests `ollama pull …`).
+The window is a frameless **cinematic HUD** (default ~1180×740). Status strip uses `SYS // OLLAMA READY`, `SYS // SYNTHESIZING` (waiting on Ollama), `SYS // SPEAKING` (TTS playing), `SYS // LISTENING`. Left side is a multi-layer pulse/radar; right side stacks transcript + transmit bar. Telemetry shows `EL REQ // N` whenever TTS/`speak_async` is invoked. Startup fails fast if the model is missing (suggests `ollama pull …`).
+
+Short greetings/chitchat (≤40 chars) skip the tools schema for a faster single Ollama round-trip; real asks still get tools.
 
 ### CLI (secondary)
 
@@ -36,10 +40,11 @@ The CLI also prints `JARVIS › Thinking…` before each reply, and exits if the
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `OLLAMA_HOST` | `http://127.0.0.1:11434` | Ollama API base |
-| `OLLAMA_MODEL` | `llama3.1:8b` | Chat model |
+| `OLLAMA_MODEL` | `llama3.1:8b` | Chat model (`llama3.2` is faster if you prefer) |
 | `ELEVENLABS_API_KEY` | *(unset)* | Enables ElevenLabs TTS; without it, macOS `say` is used |
 | `ELEVENLABS_VOICE_ID` | `onwK4e9ZLuTAKqWW03F9` (Daniel — British male) | Override voice |
-| `ELEVENLABS_MODEL_ID` | `eleven_turbo_v2_5` | ElevenLabs TTS model |
+| `ELEVENLABS_MODEL_ID` | `eleven_flash_v2_5` | ElevenLabs TTS model (flash = lower latency; override if needed) |
+| `ELEVENLABS_MAX_CHARS` | `400` | Max chars sent to TTS (full reply still shown in chat) |
 
 ### ElevenLabs voice (optional)
 
@@ -47,7 +52,8 @@ The CLI also prints `JARVIS › Thinking…` before each reply, and exits if the
 export ELEVENLABS_API_KEY="your_key_here"
 # optional:
 export ELEVENLABS_VOICE_ID="onwK4e9ZLuTAKqWW03F9"   # Daniel
-export ELEVENLABS_MODEL_ID="eleven_turbo_v2_5"
+export ELEVENLABS_MODEL_ID="eleven_flash_v2_5"       # or eleven_turbo_v2_5
+export ELEVENLABS_MAX_CHARS=400
 python app.py
 ```
 

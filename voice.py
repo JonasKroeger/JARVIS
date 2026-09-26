@@ -19,8 +19,10 @@ _whisper_model = None
 _whisper_lock = threading.Lock()
 
 # ElevenLabs defaults — Daniel (authoritative British male). Override via env.
+# Flash model for lower latency; override with ELEVENLABS_MODEL_ID if needed.
 DEFAULT_ELEVENLABS_VOICE_ID = "onwK4e9ZLuTAKqWW03F9"
-DEFAULT_ELEVENLABS_MODEL_ID = "eleven_turbo_v2_5"
+DEFAULT_ELEVENLABS_MODEL_ID = "eleven_flash_v2_5"
+DEFAULT_ELEVENLABS_MAX_CHARS = 400
 ELEVENLABS_TTS_URL = "https://api.elevenlabs.io/v1/text-to-speech/{voice_id}"
 
 
@@ -34,6 +36,22 @@ def text_for_speech(text: str) -> str:
     t = re.sub(r"#+\s*", "", t)
     t = re.sub(r"\s+", " ", t)
     return t.strip() or " "
+
+
+def _max_tts_chars() -> int:
+    raw = os.environ.get("ELEVENLABS_MAX_CHARS", "").strip()
+    if raw.isdigit():
+        return max(40, int(raw))
+    return DEFAULT_ELEVENLABS_MAX_CHARS
+
+
+def _truncate_for_tts(safe: str) -> str:
+    """Keep spoken audio short so TTS starts sooner; full text stays in chat."""
+    limit = _max_tts_chars()
+    if len(safe) <= limit:
+        return safe
+    cut = safe[:limit].rsplit(" ", 1)[0] or safe[:limit]
+    return cut.rstrip(",.;:") + "…"
 
 
 def _load_env_files() -> None:
@@ -156,10 +174,12 @@ def speak_async(text: str, on_done: Callable[[], None] | None = None) -> None:
 
     Uses ElevenLabs when ELEVENLABS_API_KEY is set; otherwise (or on any
     ElevenLabs failure) falls back to macOS `/usr/bin/say`.
+    Spoken text is truncated (~ELEVENLABS_MAX_CHARS) so synthesis starts sooner;
+    the full reply remains in the chat UI.
     """
 
     def run() -> None:
-        safe = text_for_speech(text)
+        safe = _truncate_for_tts(text_for_speech(text))
         if len(safe) > 32000:
             safe = safe[:32000] + "…"
         api_key = _elevenlabs_api_key()

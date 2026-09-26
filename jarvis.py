@@ -26,24 +26,15 @@ CLIPBOARD_MAX_CHARS = 20_000
 
 NOTES_DIR = Path.home() / ".jarvis" / "notes"
 
-SYSTEM_PROMPT = """You are JARVIS, a calm, precise personal AI assistant running locally for your user.
-Speak clearly and briefly unless asked for detail. You may use dry wit sparingly; never cruel or smug.
-When tools are needed, call them — do not invent timestamps, file contents, clipboard text, weather,
-GitHub data, or command output.
+SYSTEM_PROMPT = """You are JARVIS, a calm, precise local assistant. Be brief unless asked for detail;
+dry wit is fine, never cruel. Call tools for real actions/data — never invent timestamps, notes,
+clipboard, weather, GitHub, or command output.
 
-You can open http(s) URLs in the default browser (open_url), launch macOS apps by name (open_app),
-read/write the system clipboard (get_clipboard / set_clipboard), fetch live weather for a city
-(get_weather), and summarize open GitHub PRs authored by or awaiting review from the user
-(github_status). When you need those capabilities, call the tools — never fabricate their results.
+Tools: open_url, open_app, get_clipboard/set_clipboard, get_weather, github_status, time, notes.
+Greetings/chitchat → plain text, no tools. Only tool-call for actions or live data.
 
-For simple greetings and chitchat (e.g. "hi", "hello", "how are you"), reply in plain text
-without calling tools. Only call tools when the user asks for an action or real-world data
-(time, notes, browser, apps, clipboard, weather, GitHub, etc.).
-
-Answer factual questions directly. Straightforward history, dates, geography, and well-documented public events
-(including conflicts, wars, and historical figures) are normal reference topics: give neutral, encyclopedia-style
-facts. Do not refuse ordinary educational or historical questions. Reserve brief refusals for requests that ask
-for instructions to harm people, break the law, or produce illegal or exploitative material."""
+Answer factual/historical questions neutrally. Refuse only requests for harm, crime, or illegal/
+exploitative material."""
 
 
 TOOLS: list[dict[str, Any]] = [
@@ -632,18 +623,41 @@ def ensure_model(client: httpx.Client, model: str) -> None:
     sys.exit(1)
 
 
+_CHITCHAT_RE = re.compile(
+    r"^(?:hi|hello|hey|howdy|yo|sup|hiya|thanks|thank you|thx|cheers|"
+    r"good (?:morning|afternoon|evening|night)|how are you|how(?:'s| is) it going|"
+    r"what(?:'s| is) up|morning|evening|bye|goodbye|see you|"
+    r"ok|okay|sure|cool|nice|great|awesome|got it)(?:[!.?\s].*)?$",
+    re.IGNORECASE,
+)
+
+
+def is_chitchat(text: str) -> bool:
+    """Short greetings/thanks — skip tools for a faster Ollama round-trip."""
+    t = (text or "").strip()
+    if not t or len(t) > 40:
+        return False
+    return bool(_CHITCHAT_RE.match(t))
+
+
 def chat_round(
-    client: httpx.Client, model: str, messages: list[dict[str, Any]]
+    client: httpx.Client,
+    model: str,
+    messages: list[dict[str, Any]],
+    *,
+    use_tools: bool = True,
 ) -> tuple[list[dict[str, Any]], str | None]:
     """One API call; returns updated messages and assistant text (if any)."""
+    payload: dict[str, Any] = {
+        "model": model,
+        "messages": messages,
+        "stream": False,
+    }
+    if use_tools:
+        payload["tools"] = TOOLS
     r = client.post(
         f"{OLLAMA_HOST}/api/chat",
-        json={
-            "model": model,
-            "messages": messages,
-            "tools": TOOLS,
-            "stream": False,
-        },
+        json=payload,
         timeout=180.0,
     )
     r.raise_for_status()
@@ -682,13 +696,26 @@ def chat_round(
 def run_turn(
     client: httpx.Client, model: str, messages: list[dict[str, Any]]
 ) -> tuple[list[dict[str, Any]], str]:
-    """Run tool rounds until assistant returns text or cap hit."""
+    """Run tool rounds until assistant returns text or cap hit.
+
+    Short greetings/chitchat skip the tools schema for a faster single round-trip.
+    """
     state = messages
     last_text: str | None = None
-    for _ in range(MAX_TOOL_ROUNDS):
-        state, text = chat_round(client, model, state)
+    use_tools = True
+    for m in reversed(messages):
+        if m.get("role") == "user":
+            use_tools = not is_chitchat(str(m.get("content") or ""))
+            break
+
+    rounds = 1 if not use_tools else MAX_TOOL_ROUNDS
+    for _ in range(rounds):
+        state, text = chat_round(client, model, state, use_tools=use_tools)
         if text is not None:
             last_text = text
+            break
+        # If a no-tools call somehow returned tool_calls (shouldn't), stop
+        if not use_tools:
             break
     if last_text is None:
         last_text = "(No reply — try rephrasing or check Ollama logs.)"
