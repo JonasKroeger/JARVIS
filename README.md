@@ -21,7 +21,7 @@ python app.py
 # Or double-click run.command on macOS (activates .venv if present, then app.py)
 ```
 
-The window title is **JARVIS**. The header status shows **Ollama ready** when the model is available, **Thinking…** while a reply is generating, **Listening…** while you hold the mic, and **Speaking…** during TTS. A circular pulse ring on the side animates with those states. Startup fails fast if the model is missing (suggests `ollama pull …`).
+The window is a frameless **cinematic HUD** (default ~1180×740). Status strip uses `SYS // OLLAMA READY`, `SYS // THINKING`, `SYS // LISTENING`, `SYS // SPEAKING`. Left side is a multi-layer pulse/radar; right side stacks transcript + transmit bar. Telemetry shows `EL REQ // N` whenever TTS/`speak_async` is invoked. Startup fails fast if the model is missing (suggests `ollama pull …`).
 
 ### CLI (secondary)
 
