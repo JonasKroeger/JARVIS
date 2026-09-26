@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """
-JARVIS desktop app — cinematic Stark HUD (PyQt6), speech out (ElevenLabs /
-macOS `say`), speech in (Faster-Whisper).
+JARVIS desktop app — voice-first holographic orb HUD (PyQt6).
+
+Hold the orb (or Space) to talk; release to send. Press / for a ghost text
+field. Replies prefer TTS with a fading caption — no boxy chat panel.
 
 Run from the JARVIS folder: python app.py
 """
@@ -18,17 +20,13 @@ from pathlib import Path
 import httpx
 import numpy as np
 from PyQt6.QtCore import Qt, QThread, QTimer, pyqtSignal
-from PyQt6.QtGui import QFont
+from PyQt6.QtGui import QKeySequence, QShortcut
 from PyQt6.QtWidgets import (
     QApplication,
-    QCheckBox,
-    QHBoxLayout,
     QLabel,
     QLineEdit,
     QMainWindow,
     QMessageBox,
-    QPushButton,
-    QTextEdit,
     QVBoxLayout,
     QWidget,
 )
@@ -36,17 +34,10 @@ from PyQt6.QtWidgets import (
 import jarvis as brain
 from jarvis import ensure_model, run_turn, warmup_model
 from hud_widgets import (
-    C_ASSIST,
-    C_CYAN,
-    C_CYAN_DIM,
-    C_MUTED,
-    C_USER,
-    ChatStack,
+    CaptionStack,
     HUD_STYLESHEET,
-    HoloPanel,
     HudRoot,
-    PulseRing,
-    StatusStrip,
+    OrbVisualizer,
     TitleBar,
 )
 
@@ -73,7 +64,6 @@ VOICE_HINT = (
     "finish every sentence — never trail off mid-thought."
 )
 
-# Crash/debug trail (also mirrored by run.command stdout/stderr redirect)
 _DEBUG_LOG = Path(__file__).resolve().parent / "jarvis-debug.log"
 
 
@@ -92,16 +82,14 @@ def _debug_log(msg: str, exc: BaseException | None = None) -> None:
 
 
 class JarvisWindow(QMainWindow):
-    # Thread-safe bridge: TTS background thread → GUI slot (never create QTimers off-thread)
     speak_finished = pyqtSignal(int)
 
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("JARVIS")
-        self.resize(1180, 740)
-        self.setMinimumSize(960, 600)
+        self.resize(720, 780)
+        self.setMinimumSize(520, 560)
 
-        # Frameless cinematic chrome (no translucent bg — stable on macOS)
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint | Qt.WindowType.Window
         )
@@ -117,10 +105,12 @@ class JarvisWindow(QMainWindow):
         self._rec_stop: threading.Event | None = None
         self._rec_thread: threading.Thread | None = None
         self._rec_chunks: list[np.ndarray] = []
-        self._ready_status = "SYS // OLLAMA READY"
-        self._ring_state = PulseRing.IDLE
+        self._ready_status = "ONLINE"
+        self._ring_state = OrbVisualizer.IDLE
         self._el_req_count = 0
-        self._speak_gen = 0  # invalidate stale speak_finished when a new turn starts
+        self._speak_gen = 0
+        self._auto_speak = True  # voice-first default
+        self._space_held = False
 
         self.speak_finished.connect(self._on_speak_finished)
 
@@ -128,216 +118,101 @@ class JarvisWindow(QMainWindow):
         self.setCentralWidget(root)
         outer = QVBoxLayout(root)
         outer.setSpacing(0)
-        outer.setContentsMargins(16, 14, 16, 14)
+        outer.setContentsMargins(10, 8, 10, 12)
 
-        # —— Custom title bar ——
         self._title_bar = TitleBar()
         self._title_bar.close_requested.connect(self.close)
         self._title_bar.minimize_requested.connect(self.showMinimized)
         outer.addWidget(self._title_bar)
 
-        content = QVBoxLayout()
-        content.setSpacing(10)
-        content.setContentsMargins(8, 10, 8, 4)
-        outer.addLayout(content, stretch=1)
-
-        # —— Body: left radar | right HUD stack ——
-        body = QHBoxLayout()
-        body.setSpacing(16)
-
-        # Left: cinematic pulse / radar
-        left = QVBoxLayout()
-        left.setSpacing(8)
-        left.setAlignment(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop)
-
-        self._ring = PulseRing()
-        left.addWidget(self._ring, stretch=1)
+        # —— Orb fills the window ——
+        self._orb = OrbVisualizer()
+        self._orb.hold_started.connect(self._mic_press)
+        self._orb.hold_ended.connect(self._mic_release)
+        outer.addWidget(self._orb, stretch=1)
 
         self._ring_caption = QLabel("ONLINE")
         self._ring_caption.setObjectName("ringCaption")
         self._ring_caption.setAlignment(Qt.AlignmentFlag.AlignHCenter)
-        left.addWidget(self._ring_caption)
+        outer.addWidget(self._ring_caption)
 
-        left_wrap = QWidget()
-        left_wrap.setMinimumWidth(300)
-        left_wrap.setMaximumWidth(380)
-        left_wrap.setLayout(left)
-        body.addWidget(left_wrap)
+        self._captions = CaptionStack()
+        outer.addWidget(self._captions)
 
-        # Right: status + transcript + transmit
-        right = QVBoxLayout()
-        right.setSpacing(8)
-
-        # Status strip + telemetry
-        status_row = QHBoxLayout()
-        status_row.setSpacing(10)
-        self._status = StatusStrip()
-        self._status.setText("SYS // CHECKING OLLAMA…")
-        status_row.addWidget(self._status, stretch=1)
-
-        self._el_label = QLabel("EL REQ // 0")
-        self._el_label.setObjectName("telemetryBit")
-        self._el_label.setAlignment(
-            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
-        )
-        status_row.addWidget(self._el_label)
-        right.addLayout(status_row)
-
-        # Transcript holo panel
-        chat_panel = HoloPanel(scanlines=True)
-        chat_layout = QVBoxLayout(chat_panel)
-        chat_layout.setContentsMargins(2, 2, 2, 2)
-        chat_layout.setSpacing(0)
-
-        chat_hdr = QLabel("  TRANSCRIPT  //  SESSION")
-        chat_hdr.setObjectName("fieldLabel")
-        chat_hdr.setFixedHeight(22)
-        chat_layout.addWidget(chat_hdr)
-
-        self._chat = QTextEdit()
-        self._chat.setObjectName("chatLog")
-        self._chat.setReadOnly(True)
-        self._chat.setFont(QFont("Menlo", 12))
-        self._chat.setFrameStyle(0)
-        self._chat_stack = ChatStack(self._chat)
-        chat_layout.addWidget(self._chat_stack, stretch=1)
-        right.addWidget(chat_panel, stretch=1)
-
-        # Compact telemetry: model + speak
-        telem = QHBoxLayout()
-        telem.setSpacing(10)
-        model_lbl = QLabel("MODEL")
-        model_lbl.setObjectName("fieldLabel")
-        telem.addWidget(model_lbl)
-        self._model_entry = QLineEdit(self._model)
-        self._model_entry.setObjectName("modelInput")
-        self._model_entry.setPlaceholderText("e.g. llama3.2")
-        self._model_entry.setMinimumWidth(120)
-        self._model_entry.setMaximumWidth(180)
-        telem.addWidget(self._model_entry)
-
-        self._auto_speak = QCheckBox("SPEAK")
-        self._auto_speak.setObjectName("speakBox")
-        self._auto_speak.setChecked(True)
-        if speak_async is None:
-            self._auto_speak.setChecked(False)
-            self._auto_speak.setEnabled(False)
-        telem.addWidget(self._auto_speak)
-        telem.addStretch(1)
-        right.addLayout(telem)
-
-        # Transmit bar
-        tx_panel = HoloPanel(scanlines=False)
-        tx_layout = QHBoxLayout(tx_panel)
-        tx_layout.setContentsMargins(4, 6, 6, 6)
-        tx_layout.setSpacing(8)
-
-        chevron = QLabel("›")
-        chevron.setObjectName("chevron")
-        tx_layout.addWidget(chevron)
-
+        # Ghost text entry — hidden until /
         self._entry = QLineEdit()
-        self._entry.setObjectName("msgInput")
-        self._entry.setPlaceholderText("Transmit a message…")
+        self._entry.setObjectName("ghostInput")
+        self._entry.setPlaceholderText("Type a message…  (Esc to hide)")
         self._entry.returnPressed.connect(self._send_text)
-        tx_layout.addWidget(self._entry, stretch=1)
+        self._entry.hide()
+        outer.addWidget(self._entry)
 
-        self._mic_btn = QPushButton("●")
-        self._mic_btn.setObjectName("micBtn")
-        self._mic_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._mic_btn.setToolTip("Hold to speak")
-        self._mic_btn.pressed.connect(self._mic_press)
-        self._mic_btn.released.connect(self._mic_release)
-        if sd is None or transcribe_audio is None:
-            self._mic_btn.setEnabled(False)
-            self._mic_btn.setToolTip("Mic unavailable — install sounddevice + faster-whisper")
-            self._mic_btn.setText("×")
-        tx_layout.addWidget(self._mic_btn)
-
-        self._send_btn = QPushButton("TRANSMIT")
-        self._send_btn.setObjectName("sendBtn")
-        self._send_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._send_btn.clicked.connect(self._send_text)
-        tx_layout.addWidget(self._send_btn)
-
-        right.addWidget(tx_panel)
-        body.addLayout(right, stretch=1)
-        content.addLayout(body, stretch=1)
-
-        foot = QLabel(
-            f"NOTES  {brain.NOTES_DIR}  ·  CLI  python jarvis.py  ·  HUD v3"
-        )
-        foot.setObjectName("footLabel")
-        content.addWidget(foot)
+        hint = QLabel("HOLD ORB  ·  SPACE  ·  / TEXT")
+        hint.setObjectName("hintLabel")
+        hint.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+        outer.addWidget(hint)
 
         self.setStyleSheet(HUD_STYLESHEET)
 
+        # Keyboard: Space = hold-to-talk; / = ghost input
+        self._sc_slash = QShortcut(QKeySequence("/"), self)
+        self._sc_slash.activated.connect(self._show_ghost_input)
+        self._sc_esc = QShortcut(QKeySequence("Escape"), self)
+        self._sc_esc.activated.connect(self._hide_ghost_input)
+
         QTimer.singleShot(100, self._check_ollama)
 
-    # —— Status / ring ——
+    # —— Status / orb ——
     def _set_status(self, text: str) -> None:
-        # Normalize plain phrases into SYS // HUD format when callers pass legacy text
         display = text
         lower = text.lower()
-        if not text.upper().startswith("SYS"):
-            if "listening" in lower:
-                display = "SYS // LISTENING"
-            elif "synthesiz" in lower:
-                display = "SYS // SYNTHESIZING"
-            elif "thinking" in lower:
-                display = "SYS // THINKING"
-            elif "transcrib" in lower:
-                display = "SYS // TRANSCRIBING"
-            elif "processing" in lower:
-                display = "SYS // PROCESSING"
-            elif "speaking" in lower:
-                display = "SYS // SPEAKING"
-            elif "ollama ready" in lower:
-                display = "SYS // OLLAMA READY"
-            elif "checking" in lower:
-                display = "SYS // CHECKING OLLAMA…"
-            elif "error" in lower:
-                display = f"SYS // ERROR — {text}"
-            elif "cannot" in lower or "missing" in lower:
-                display = f"SYS // {text.upper()}"
-            else:
-                display = f"SYS // {text.upper()}" if text else "SYS // STANDBY"
-        self._status.setText(display)
-        self._sync_ring_from_status(display)
+        if "listening" in lower:
+            display = "LISTENING"
+        elif "synthesiz" in lower:
+            display = "SYNTHESIZING"
+        elif "thinking" in lower:
+            display = "THINKING"
+        elif "transcrib" in lower:
+            display = "TRANSCRIBING"
+        elif "processing" in lower:
+            display = "PROCESSING"
+        elif "speaking" in lower:
+            display = "SPEAKING"
+        elif "ollama ready" in lower or "online" in lower:
+            display = "ONLINE"
+        elif "checking" in lower:
+            display = "BOOTING…"
+        elif "error" in lower:
+            display = "ERROR"
+        elif "cannot" in lower or "missing" in lower:
+            display = "STANDBY"
+        elif text.upper().startswith("SYS"):
+            display = text.split("//", 1)[-1].strip() or "STANDBY"
+        self._ring_caption.setText(display)
+        self._sync_orb_from_status(display)
 
-    def _sync_ring_from_status(self, text: str) -> None:
+    def _sync_orb_from_status(self, text: str) -> None:
         lower = text.lower()
         if "listening" in lower:
-            state, caption = PulseRing.LISTENING, "LISTENING"
-        elif (
-            "thinking" in lower
-            or "synthesiz" in lower
-            or "transcrib" in lower
-            or "processing" in lower
+            state = OrbVisualizer.LISTENING
+        elif any(
+            k in lower
+            for k in ("thinking", "synthesiz", "transcrib", "processing", "booting")
         ):
-            state, caption = PulseRing.THINKING, "THINKING"
+            state = OrbVisualizer.THINKING
         elif "speaking" in lower:
-            state, caption = PulseRing.SPEAKING, "SPEAKING"
-        elif "error" in lower or "cannot" in lower or "missing" in lower:
-            state, caption = PulseRing.IDLE, "STANDBY"
+            state = OrbVisualizer.SPEAKING
         else:
-            state, caption = PulseRing.IDLE, "ONLINE"
+            state = OrbVisualizer.IDLE
         self._ring_state = state
-        self._ring.set_state(state)
-        self._ring_caption.setText(caption)
+        self._orb.set_state(state)
 
     def _on_speak_finished(self, gen: int) -> None:
-        """GUI-thread slot: reset status + ring after TTS (ignore stale gens)."""
         if gen != self._speak_gen:
             return
         self._set_status(self._ready_status)
-        self._ring.set_state(PulseRing.IDLE)
-        self._ring_caption.setText("ONLINE")
-        self._ring_state = PulseRing.IDLE
-
-    def _bump_el_req(self) -> None:
-        self._el_req_count += 1
-        self._el_label.setText(f"EL REQ // {self._el_req_count}")
+        self._orb.set_state(OrbVisualizer.IDLE)
+        self._ring_state = OrbVisualizer.IDLE
 
     def _check_ollama(self) -> None:
         try:
@@ -363,15 +238,13 @@ class JarvisWindow(QMainWindow):
                 (
                     f"Model {self._model!r} is not installed in Ollama.\n\n"
                     f"Pull it with:\n  {pull}\n\n"
-                    "Or set another model via OLLAMA_MODEL / the Model field."
+                    "Or set another model via OLLAMA_MODEL."
                 ),
             )
             return
 
-        self._ready_status = "SYS // OLLAMA READY"
+        self._ready_status = "ONLINE"
         self._set_status(self._ready_status)
-        # Warm the model so the first user message is not a cold load.
-        # Own httpx.Client — httpx.Client is not thread-safe; never share with UI/worker.
         model = self._model
 
         def _warm() -> None:
@@ -391,34 +264,15 @@ class JarvisWindow(QMainWindow):
 
         threading.Thread(target=_warm, daemon=True).start()
 
-    def _append_chat(self, who: str, text: str) -> None:
-        self._chat_stack.set_empty(False)
-        ts = datetime.now().strftime("%H:%M")
-        ts_html = (
-            f'<span style="color:{C_MUTED};font-size:10px;'
-            f'letter-spacing:1px;">{ts}</span>'
-        )
-        if who == "You":
-            html = (
-                f'<p style="margin:10px 0 2px 0;line-height:1.45;">'
-                f"{ts_html}"
-                f'<span style="color:{C_MUTED};">  </span>'
-                f'<span style="color:{C_USER};font-size:10px;font-weight:600;'
-                f'letter-spacing:2px;">YOU</span>'
-                f'<br><span style="color:{C_CYAN};">{_esc(text)}</span></p>'
-            )
-        elif who == "JARVIS":
-            html = (
-                f'<p style="margin:4px 0 12px 0;line-height:1.45;">'
-                f"{ts_html}"
-                f'<span style="color:{C_MUTED};">  </span>'
-                f'<span style="color:{C_CYAN_DIM};font-size:10px;font-weight:600;'
-                f'letter-spacing:2px;">JARVIS</span>'
-                f'<br><span style="color:{C_ASSIST};">{_esc(text)}</span></p>'
-            )
-        else:
-            html = f"<p>{_esc(who)}: {_esc(text)}</p>"
-        self._chat.append(html)
+    def _show_ghost_input(self) -> None:
+        self._entry.show()
+        self._entry.setFocus()
+        self._entry.selectAll()
+
+    def _hide_ghost_input(self) -> None:
+        self._entry.clear()
+        self._entry.hide()
+        self._orb.setFocus()
 
     def _send_text(self) -> None:
         if self._busy:
@@ -427,100 +281,69 @@ class JarvisWindow(QMainWindow):
         if not text:
             return
         self._entry.clear()
+        self._entry.hide()
         self._submit_user_message(text)
 
     def _submit_user_message(self, text: str) -> None:
-        # Invalidate any in-flight speak_finished from a previous turn + stop audio
         self._speak_gen += 1
         if cancel_speak is not None:
             cancel_speak()
-        self._model = self._model_entry.text().strip() or self._model
-        self._append_chat("You", text)
+        self._captions.show_user(text)
         self._busy = True
-        self._send_btn.setEnabled(False)
-        self._entry.setEnabled(False)
         self._stream_active = False
         self._stream_buf = ""
-        self._set_status("SYS // THINKING")
+        self._set_status("THINKING")
 
-        # Pass a snapshot of messages; worker owns its httpx.Client (not thread-safe to share).
         self._worker = OllamaWorker(self._model, list(self._messages), text, self)
         self._worker.token.connect(self._on_ollama_token)
         self._worker.finished_ok.connect(self._on_ollama_ok)
         self._worker.finished_err.connect(self._on_ollama_err)
         self._worker.start()
 
-    def _begin_assistant_stream(self) -> None:
-        """Open a JARVIS bubble; tokens are inserted as plain text at the end."""
-        self._chat_stack.set_empty(False)
-        ts = datetime.now().strftime("%H:%M")
-        ts_html = (
-            f'<span style="color:{C_MUTED};font-size:10px;'
-            f'letter-spacing:1px;">{ts}</span>'
-        )
-        html = (
-            f'<p style="margin:4px 0 12px 0;line-height:1.45;">'
-            f"{ts_html}"
-            f'<span style="color:{C_MUTED};">  </span>'
-            f'<span style="color:{C_CYAN_DIM};font-size:10px;font-weight:600;'
-            f'letter-spacing:2px;">JARVIS</span>'
-            f"<br></p>"
-        )
-        self._chat.append(html)
-
     def _on_ollama_token(self, delta: str) -> None:
-        """Main-thread slot. Live QTextEdit insert disabled for stability — buffer only.
-
-        Tokens still arrive via QueuedConnection (safe). Full reply is shown in
-        ``_on_ollama_ok`` via ``_append_chat`` (HTML path). Re-enable live insert
-        later once HUD crash is confirmed gone.
-        """
         if not delta:
             return
         if not self._stream_active:
             self._stream_active = True
             self._stream_buf = ""
-            self._set_status("SYS // SYNTHESIZING")
+            self._set_status("SYNTHESIZING")
         self._stream_buf += delta
 
     def _on_ollama_ok(self, msgs: list, reply: str) -> None:
         self._messages = msgs
         self._busy = False
-        self._send_btn.setEnabled(True)
-        self._entry.setEnabled(True)
-        # Live token insert is disabled; always render the full reply here.
-        # Never gate visible text on TTS — speak_async is background-only.
-        self._append_chat("JARVIS", reply or "")
         self._stream_active = False
         self._stream_buf = ""
-        if self._auto_speak.isChecked() and speak_async:
+        self._captions.show_reply(reply or "")
+        if self._auto_speak and speak_async:
             self._speak_gen += 1
             gen = self._speak_gen
-            self._set_status("SYS // SPEAKING")
-            self._bump_el_req()
+            self._set_status("SPEAKING")
+            self._el_req_count += 1
 
             def _done() -> None:
-                # Background thread: only emit (thread-safe). Never create QTimers here.
                 self.speak_finished.emit(gen)
 
             speak_async(reply, on_done=_done)
         else:
             self._set_status(self._ready_status)
-            self._ring.set_state(PulseRing.IDLE)
+            self._orb.set_state(OrbVisualizer.IDLE)
 
     def _on_ollama_err(self, err: str) -> None:
         self._busy = False
-        self._send_btn.setEnabled(True)
-        self._entry.setEnabled(True)
         self._stream_active = False
         self._stream_buf = ""
-        self._append_chat("JARVIS", f"(Error: {err})")
-        self._set_status("Error — see chat")
+        self._captions.show_reply(f"(Error: {err})")
+        self._set_status("ERROR")
 
+    # —— Mic / hold-to-talk ——
     def _mic_press(self) -> None:
         if self._busy or sd is None:
             return
         if self._mic_recording:
+            return
+        if transcribe_audio is None:
+            self._set_status("Mic unavailable")
             return
         self._mic_recording = True
         self._rec_chunks = []
@@ -542,11 +365,7 @@ class JarvisWindow(QMainWindow):
 
         self._rec_thread = threading.Thread(target=loop, daemon=True)
         self._rec_thread.start()
-        self._set_status("Listening… (release to send)")
-        self._mic_btn.setText("◉")
-        self._mic_btn.setProperty("recording", True)
-        self._mic_btn.style().unpolish(self._mic_btn)
-        self._mic_btn.style().polish(self._mic_btn)
+        self._set_status("LISTENING")
 
     def _mic_release(self) -> None:
         if not self._mic_recording or self._rec_stop is None:
@@ -555,18 +374,13 @@ class JarvisWindow(QMainWindow):
         self._rec_stop.set()
         if self._rec_thread:
             self._rec_thread.join(timeout=2.0)
-        self._mic_btn.setText("●")
-        self._mic_btn.setProperty("recording", False)
-        self._mic_btn.style().unpolish(self._mic_btn)
-        self._mic_btn.style().polish(self._mic_btn)
-        self._set_status("Processing speech…")
+        self._set_status("PROCESSING")
 
         if not self._rec_chunks:
             self._set_status(self._ready_status)
             return
 
         audio = np.concatenate(self._rec_chunks, axis=0).flatten()
-
         self._tw = TranscribeWorker(audio, self)
         self._tw.finished_ok.connect(self._on_transcribe_ok)
         self._tw.finished_err.connect(self._on_transcribe_err)
@@ -575,31 +389,41 @@ class JarvisWindow(QMainWindow):
 
     def _on_transcribe_ok(self, text: str) -> None:
         if text:
-            self._entry.setText(text)
-            self._set_status("Ollama ready — press TRANSMIT or Enter")
+            self._submit_user_message(text)
         else:
-            self._set_status("Didn't catch that — try again")
+            self._set_status("Didn't catch that")
+            QTimer.singleShot(1800, lambda: self._set_status(self._ready_status))
 
     def _on_transcribe_err(self, err: str) -> None:
         self._set_status(self._ready_status)
         QMessageBox.critical(self, "JARVIS", err)
 
+    def keyPressEvent(self, event) -> None:  # noqa: N802
+        if (
+            event.key() == Qt.Key.Key_Space
+            and not event.isAutoRepeat()
+            and not self._entry.isVisible()
+        ):
+            self._space_held = True
+            self._mic_press()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    def keyReleaseEvent(self, event) -> None:  # noqa: N802
+        if event.key() == Qt.Key.Key_Space and not event.isAutoRepeat() and self._space_held:
+            self._space_held = False
+            self._mic_release()
+            event.accept()
+            return
+        super().keyReleaseEvent(event)
+
     def closeEvent(self, event) -> None:  # noqa: N802
-        self._speak_gen += 1  # ignore late TTS callbacks
+        self._speak_gen += 1
         if cancel_speak is not None:
             cancel_speak()
         self._client.close()
         super().closeEvent(event)
-
-
-def _esc(text: str) -> str:
-    return (
-        text.replace("&", "&amp;")
-        .replace("<", "&lt;")
-        .replace(">", "&gt;")
-        .replace('"', "&quot;")
-        .replace("\n", "<br>")
-    )
 
 
 class OllamaWorker(QThread):
@@ -616,14 +440,12 @@ class OllamaWorker(QThread):
     ) -> None:
         super().__init__(parent)
         self._model = model
-        # Snapshot only — never mutate the GUI thread's list from this QThread.
         self._messages = list(messages)
         self._user_text = user_text
 
     def run(self) -> None:
         client: httpx.Client | None = None
         try:
-            # httpx.Client is not thread-safe; each worker owns its own client.
             client = httpx.Client(timeout=180.0)
             messages = list(self._messages)
             messages.append({"role": "user", "content": self._user_text})
@@ -679,12 +501,11 @@ def main() -> None:
     )
     if sys.platform != "darwin" and not os.environ.get("ELEVENLABS_API_KEY"):
         print("Note: TTS uses ElevenLabs (set ELEVENLABS_API_KEY) or macOS `say`.")
-    # High-DPI awareness for crisp HUD painting
     os.environ.setdefault("QT_ENABLE_HIGHDPI_SCALING", "1")
     try:
         app = QApplication(sys.argv)
         app.setApplicationName("JARVIS")
-        app.setStyle("Fusion")  # avoid native grey chrome leaking through
+        app.setStyle("Fusion")
         win = JarvisWindow()
         win.show()
         _debug_log("JARVIS window shown; entering event loop")
