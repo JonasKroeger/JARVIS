@@ -18,7 +18,7 @@ from pathlib import Path
 import httpx
 import numpy as np
 from PyQt6.QtCore import Qt, QThread, QTimer, pyqtSignal
-from PyQt6.QtGui import QFont, QTextCursor
+from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -463,41 +463,30 @@ class JarvisWindow(QMainWindow):
         self._chat.append(html)
 
     def _on_ollama_token(self, delta: str) -> None:
-        """Main-thread slot (QueuedConnection). self._chat is a QTextEdit."""
+        """Main-thread slot. Live QTextEdit insert disabled for stability — buffer only.
+
+        Tokens still arrive via QueuedConnection (safe). Full reply is shown in
+        ``_on_ollama_ok`` via ``_append_chat`` (HTML path). Re-enable live insert
+        later once HUD crash is confirmed gone.
+        """
         if not delta:
             return
-        try:
-            if not self._stream_active:
-                self._stream_active = True
-                self._stream_buf = ""
-                self._begin_assistant_stream()
-                self._set_status("SYS // SYNTHESIZING")
-            self._stream_buf += delta
-            cursor = self._chat.textCursor()
-            cursor.movePosition(QTextCursor.MoveOperation.End)
-            # Insert as plain text (deltas are raw model tokens)
-            cursor.insertText(delta)
-            self._chat.setTextCursor(cursor)
-            self._chat.ensureCursorVisible()
-        except Exception as e:  # noqa: BLE001 — never let UI update kill the process
-            _debug_log("stream UI insert failed; will show full reply on finish", e)
-            # Disable further live inserts this turn; finished_ok will append full reply.
-            self._stream_active = False
+        if not self._stream_active:
+            self._stream_active = True
             self._stream_buf = ""
+            self._set_status("SYS // SYNTHESIZING")
+        self._stream_buf += delta
 
     def _on_ollama_ok(self, msgs: list, reply: str) -> None:
         self._messages = msgs
         self._busy = False
         self._send_btn.setEnabled(True)
         self._entry.setEnabled(True)
-        # If nothing streamed (buffered tool path), show full reply now.
+        # Live token insert is disabled; always render the full reply here.
         # Never gate visible text on TTS — speak_async is background-only.
-        if not self._stream_active:
-            self._append_chat("JARVIS", reply)
-        elif reply and reply != self._stream_buf:
-            # Direct/single-shot may have sent the full string as one "token";
-            # if stream buf differs, replace isn’t needed — prefer shown text.
-            pass
+        self._append_chat("JARVIS", reply or "")
+        self._stream_active = False
+        self._stream_buf = ""
         if self._auto_speak.isChecked() and speak_async:
             self._speak_gen += 1
             gen = self._speak_gen
@@ -517,13 +506,9 @@ class JarvisWindow(QMainWindow):
         self._busy = False
         self._send_btn.setEnabled(True)
         self._entry.setEnabled(True)
-        if not self._stream_active:
-            self._append_chat("JARVIS", f"(Error: {err})")
-        else:
-            cursor = self._chat.textCursor()
-            cursor.movePosition(QTextCursor.MoveOperation.End)
-            cursor.insertText(f"\n(Error: {err})")
-            self._chat.setTextCursor(cursor)
+        self._stream_active = False
+        self._stream_buf = ""
+        self._append_chat("JARVIS", f"(Error: {err})")
         self._set_status("Error — see chat")
 
     def _mic_press(self) -> None:
