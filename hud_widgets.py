@@ -1341,7 +1341,7 @@ class OrbVisualizer(QWidget):
             and not self._pathways
             and not self._lit_edges
         )
-        fb_key = (int(w) // 8, int(h) // 8, int(round((self._geom_yaw or self._yaw) * 20)))
+        fb_key = (int(w) // 32, int(h) // 32, int(round((self._geom_yaw or 0.0) * 20)))
         if quiet:
             if self._idle_fb is None or self._idle_fb_key != fb_key:
                 fb = QPixmap(max(1, w), max(1, h))
