@@ -533,18 +533,28 @@ def _in_brain(x: float, y: float, z: float) -> bool:
 
     Coords: x=left-right, y=up (superior+), z=anterior+. Mesh is Y-up with
     brainstem toward −Y. Occupancy grid covers approx world [−1,1]^3.
-    Bake is pre-dilated so this is a single cell lookup (no 27-neigh scan).
     """
     g = _MESH.occ_g
     # world [-1,1] → grid
-    ix = int((x + 1.0) * 0.5 * (g - 1))
-    iy = int((y + 1.0) * 0.5 * (g - 1))
-    iz = int((z + 1.0) * 0.5 * (g - 1))
+    fx = (x + 1.0) * 0.5 * (g - 1)
+    fy = (y + 1.0) * 0.5 * (g - 1)
+    fz = (z + 1.0) * 0.5 * (g - 1)
+    ix, iy, iz = int(fx), int(fy), int(fz)
     if ix < 0 or iy < 0 or iz < 0 or ix >= g or iy >= g or iz >= g:
+        # soft fall back to silhouette + thickness near bounds
         if not _point_in_poly(z, y):
             return False
         return abs(x) <= 0.42
-    return bool(_MESH.occ[ix, iy, iz])
+    if _MESH.occ[ix, iy, iz]:
+        return True
+    # neighborhood soften so filaments hug cortex
+    for dx in (-1, 0, 1):
+        for dy in (-1, 0, 1):
+            for dz in (-1, 0, 1):
+                nx, ny, nz = ix + dx, iy + dy, iz + dz
+                if 0 <= nx < g and 0 <= ny < g and 0 <= nz < g and _MESH.occ[nx, ny, nz]:
+                    return abs(x) <= 0.55
+    return False
 
 
 
@@ -560,7 +570,7 @@ def _radial(x: float, y: float, z: float) -> float:
 
 
 def _build_brain(seed: int = 42) -> _BrainGraph:
-    """Filament scaffold (perf-thinned) — lateral silhouette from axons + junction nodes."""
+    """Dense filament scaffold — lateral anatomical silhouette from axons + junction nodes."""
     rng = random.Random(seed)
     nodes: list[_Node] = []
 
@@ -574,7 +584,7 @@ def _build_brain(seed: int = 42) -> _BrainGraph:
 
     # —— Cortex shell along folds (silhouette read — densest) ——
     attempts = 0
-    while len(nodes) < 52 and attempts < 4500:
+    while len(nodes) < 110 and attempts < 9000:
         attempts += 1
         x = rng.uniform(-0.62, 0.62)
         y = rng.uniform(-0.55, 0.58)
@@ -597,12 +607,12 @@ def _build_brain(seed: int = 42) -> _BrainGraph:
                 # keep if still near surface
                 if rad < 0.70:
                     continue
-        _add(x, y, z, 0.014 + rng.random() * 0.012, layer=2, min_d2=0.028)
+        _add(x, y, z, 0.014 + rng.random() * 0.012, layer=2, min_d2=0.016)
 
     # —— Mid-depth volume fill (finer lines) ——
     attempts = 0
-    target_mid = len(nodes) + 26
-    while len(nodes) < target_mid and attempts < 3500:
+    target_mid = len(nodes) + 55
+    while len(nodes) < target_mid and attempts < 7000:
         attempts += 1
         x = rng.uniform(-0.48, 0.48)
         y = rng.uniform(-0.50, 0.48)
@@ -611,12 +621,12 @@ def _build_brain(seed: int = 42) -> _BrainGraph:
             continue
         if _radial(x, y, z) > 0.82:
             continue
-        _add(x, y, z, 0.009 + rng.random() * 0.007, layer=1, min_d2=0.024)
+        _add(x, y, z, 0.009 + rng.random() * 0.007, layer=1, min_d2=0.014)
 
     # —— Deep core (subtle cooler mass) ——
     attempts = 0
-    target_core = len(nodes) + 10
-    while len(nodes) < target_core and attempts < 2000:
+    target_core = len(nodes) + 22
+    while len(nodes) < target_core and attempts < 4000:
         attempts += 1
         x = rng.uniform(-0.28, 0.28)
         y = rng.uniform(-0.28, 0.28)
@@ -625,7 +635,7 @@ def _build_brain(seed: int = 42) -> _BrainGraph:
             continue
         if _radial(x, y, z) > 0.48:
             continue
-        _add(x, y, z, 0.007 + rng.random() * 0.005, layer=0, min_d2=0.030)
+        _add(x, y, z, 0.007 + rng.random() * 0.005, layer=0, min_d2=0.018)
 
     # —— Brainstem / cerebellum anchors (shape readable in lateral view) ——
     anchors = [
@@ -670,8 +680,8 @@ def _build_brain(seed: int = 42) -> _BrainGraph:
 
     # —— Extra cortex fold glitter (junctions along gyri) ——
     attempts = 0
-    micro_target = len(nodes) + 22
-    while len(nodes) < micro_target and attempts < 3500:
+    micro_target = len(nodes) + 70
+    while len(nodes) < micro_target and attempts < 8000:
         attempts += 1
         x = rng.uniform(-0.58, 0.58)
         y = rng.uniform(-0.50, 0.55)
@@ -682,12 +692,12 @@ def _build_brain(seed: int = 42) -> _BrainGraph:
         if abs(_fold_field(x, y, z)) < 0.02 and rng.random() < 0.55:
             continue
         layer = 2 if _radial(x, y, z) > 0.55 else 1
-        _add(x, y, z, 0.008 + rng.random() * 0.008, layer=layer, min_d2=0.016)
+        _add(x, y, z, 0.008 + rng.random() * 0.008, layer=layer, min_d2=0.008)
 
     # —— Dense k-NN filament edges ——
     edges: list[_Edge] = []
     seen: set[tuple[int, int]] = set()
-    k = 3
+    k = 5
     for i, ni in enumerate(nodes):
         dists: list[tuple[float, int]] = []
         for j, nj in enumerate(nodes):
@@ -699,7 +709,7 @@ def _build_brain(seed: int = 42) -> _BrainGraph:
                 continue
             dists.append((d2, j))
         dists.sort()
-        take = k + (1 if ni.layer >= 2 else 0)
+        take = k + (2 if ni.layer >= 2 else 0) + (1 if ni.layer == 0 else 0)
         for _, j in dists[:take]:
             a, b = (i, j) if i < j else (j, i)
             if (a, b) in seen:
@@ -720,7 +730,7 @@ def _build_brain(seed: int = 42) -> _BrainGraph:
 
     # Longitudinal fold ribbons (cortex contour filaments)
     cortex_idx = [i for i, n in enumerate(nodes) if n.layer >= 2]
-    for _ in range(10):
+    for _ in range(28):
         if len(cortex_idx) < 2:
             break
         a = rng.choice(cortex_idx)
@@ -767,11 +777,11 @@ def _build_brain(seed: int = 42) -> _BrainGraph:
     wall_idx: list[int] = []
     mesh_verts = _MESH.verts
     # Stratified subsample of mesh verts → filament junctions on the cortex
-    step = max(1, len(mesh_verts) // 55)
+    step = max(1, len(mesh_verts) // 140)
     for vi in range(0, len(mesh_verts), step):
         wx, wy, wz = mesh_verts[vi]
         before = len(nodes)
-        if _add(wx, wy, wz, 0.015 + rng.random() * 0.008, layer=2, min_d2=0.012):
+        if _add(wx, wy, wz, 0.015 + rng.random() * 0.008, layer=2, min_d2=0.005):
             wall_idx.append(len(nodes) - 1)
         else:
             best_i, best_d = 0, 9.0
@@ -788,7 +798,7 @@ def _build_brain(seed: int = 42) -> _BrainGraph:
     for i in range(len(outline) - 1):
         z0, y0 = outline[i]
         z1, y1 = outline[i + 1]
-        for t in (0.0,):
+        for t in (0.0, 0.5):
             zz = z0 + (z1 - z0) * t
             yy = y0 + (y1 - y0) * t
             # pick mesh vert nearest to this lateral rim (prefer |x| small)
@@ -799,7 +809,7 @@ def _build_brain(seed: int = 42) -> _BrainGraph:
                     best_s = s
                     best_v = j
             wx, wy, wz = mesh_verts[best_v]
-            if _add(wx, wy, wz, 0.016, layer=2, min_d2=0.010):
+            if _add(wx, wy, wz, 0.016, layer=2, min_d2=0.004):
                 wall_idx.append(len(nodes) - 1)
 
     # Connect nearby wall junctions into a cortical filament shell
@@ -814,7 +824,7 @@ def _build_brain(seed: int = 42) -> _BrainGraph:
             if d2 < 0.085:
                 nearest.append((d2, b))
         nearest.sort()
-        for _, b in nearest[:2]:
+        for _, b in nearest[:3]:
             key = (a, b) if a < b else (b, a)
             if key in seen:
                 continue
@@ -905,18 +915,21 @@ class OrbVisualizer(QWidget):
         self._pathways: list[dict] = []  # {edges: list[int], step: float, life: float, bright: float}
         self._path_acc = 0.0
         self._adj: dict[int, list[int]] = self._build_adjacency()
-        # Cached projected mesh edge samples for wireframe wall (rebuilt lazily)
-        self._mesh_edge_cache_key = None
-        self._mesh_edge_cache: list[tuple[float, float, float, float, float]] = []
-        # Draw subset of mesh edges (~650) — full edge list is too dense for Mac paint
-        _me = _MESH.edges
-        _step = max(1, (len(_me) + 649) // 650)
-        self._mesh_draw_edges = list(_me[::_step])
-        self._idle_quiet = True
+        # Full mesh edge list (visual detail). Paint batches via cached QPainterPath.
+        self._mesh_draw_edges = list(_MESH.edges)
+        # Camera-stable geometry cache (rebuild on yaw/size change; bob via translate)
+        self._geom_key = None
+        self._mesh_path = QPainterPath()
+        self._fil_cold_path = QPainterPath()  # dim filaments tessellated in screen space
+        self._node_proj: list[tuple[float, float, float]] = []
+        self._edge_mid_d: list[float] = []
+        self._edge_rad: list[float] = []
+        self._last_paint_ms = 16.0
+        self._paint_t0 = 0.0
 
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._tick)
-        self._timer.start(100)  # ~10 fps idle; rises when active
+        self._timer.start(50)  # ~20 fps idle; rises when active, backs off if paint is heavy
 
     def set_state(self, state: str) -> None:
         prev = self._state
@@ -944,21 +957,19 @@ class OrbVisualizer(QWidget):
     def _activity(self) -> tuple[float, float, float, int]:
         """Return (spawn_rate, pulse_speed, glow_mul, pulse_cap) by state."""
         if self._state == self.SPEAKING:
-            return 7.0, 1.55, 1.12, 24
+            return 10.5, 1.70, 1.18, 52
         if self._state == self.LISTENING:
-            return 4.0, 1.15, 0.90, 14  # question in — start linking
+            return 6.5, 1.25, 0.95, 34  # question in — start linking
         if self._state == self.THINKING:
-            return 7.5, 1.40, 1.05, 20  # actively form pathways
-        return 0.35, 0.45, 0.48, 6
+            return 12.0, 1.55, 1.12, 48  # actively form pathways
+        return 0.70, 0.55, 0.50, 14
 
     def _tick(self) -> None:
-        # Adaptive cadence: hard idle throttle, usable thinking/speaking
-        if self._state == self.IDLE:
-            interval = 110  # ~9 fps
-        elif self._state == self.SPEAKING:
-            interval = 45   # ~22 fps
-        else:
-            interval = 50   # ~20 fps listen/think
+        # Adaptive cadence: snappier when active, but never faster than paint can finish
+        base = 50 if self._state == self.IDLE else 33
+        # If last paint was heavy, back off so the GUI thread doesn't pile updates
+        interval = max(base, int(self._last_paint_ms * 1.15) + 4)
+        interval = min(interval, 100)  # floor ~10 fps even under load
         if self._timer.interval() != interval:
             self._timer.setInterval(interval)
         dt = interval / 1000.0
@@ -984,18 +995,18 @@ class OrbVisualizer(QWidget):
         thinking = self._state in (self.LISTENING, self.THINKING)
         speaking = self._state == self.SPEAKING
         if thinking:
-            path_rate = 2.4 if self._state == self.THINKING else 1.4
+            path_rate = 4.2 if self._state == self.THINKING else 2.2
             self._path_acc += path_rate * dt
             while self._path_acc >= 1.0 and self._graph.edges:
                 self._path_acc -= 1.0
-                if len(self._pathways) >= 7:
+                if len(self._pathways) >= 14:
                     break
                 # Grow a multi-hop route from a random cortex-ish node
                 start_e = self._rng.randrange(len(self._graph.edges))
                 chain = [start_e]
                 used = {start_e}
                 cur_node = self._graph.edges[start_e].b
-                hops = 3 + int(self._rng.random() * 4)
+                hops = 5 + int(self._rng.random() * 7)
                 for _ in range(hops):
                     cands = [ei for ei in self._adj.get(cur_node, []) if ei not in used]
                     if not cands:
@@ -1105,7 +1116,7 @@ class OrbVisualizer(QWidget):
                 e = self._graph.edges[p.edge]
                 hit = p.bright * (0.90 if self._state == self.SPEAKING else 0.55)
                 self._graph.nodes[e.b].flash = max(self._graph.nodes[e.b].flash, hit)
-                if self._state == self.SPEAKING and self._rng.random() < 0.28:
+                if self._state == self.SPEAKING and self._rng.random() < 0.34:
                     for j in self._adj.get(e.b, ()):
                         if j == p.edge:
                             continue
@@ -1135,13 +1146,6 @@ class OrbVisualizer(QWidget):
         for k in dead:
             self._lit_edges.pop(k, None)
 
-        # Track quiet idle for cheaper paint (no AA); always paint so bob stays smooth
-        self._idle_quiet = (
-            self._state == self.IDLE
-            and not self._pulses
-            and not self._pathways
-            and not self._lit_edges
-        )
         self.update()
 
     # —— Interaction ——
@@ -1189,12 +1193,18 @@ class OrbVisualizer(QWidget):
         scale: float,
         *,
         parallax: float = 0.0,
+        bob: float | None = None,
     ) -> tuple[float, float, float]:
-        """Yaw + pitch sway → screen xy + depth weight (0 back .. 1 front)."""
+        """Yaw + pitch sway → screen xy + depth weight (0 back .. 1 front).
+
+        bob=None uses self._bob. Pass bob=0 when baking camera-stable geometry
+        (screen bob is applied via QPainter.translate instead).
+        """
         cyaw, syaw = math.cos(self._yaw), math.sin(self._yaw)
         xr = x * cyaw - z * syaw
         zr = x * syaw + z * cyaw
-        yr = y + self._bob * (1.0 + parallax * 0.35)
+        bob_v = self._bob if bob is None else bob
+        yr = y + bob_v * (1.0 + parallax * 0.35)
         pitch = self._pitch_base + self._pitch_sway
         cp, sp = math.cos(pitch), math.sin(pitch)
         y2 = yr * cp - zr * sp
@@ -1229,14 +1239,84 @@ class OrbVisualizer(QWidget):
             u * u * p0[2] + 2 * u * t * p1[2] + t * t * p2[2],
         )
 
+    def _ensure_geom_cache(self, cx: float, cy: float, scale: float) -> None:
+        """Rebuild screen-space mesh/filament paths when camera (not bob) changes.
+
+        Root cause of lag: every paintEvent re-projected ~5k mesh edges (twice)
+        and issued ~5k+/1.4k individual QPen+drawLine calls (~78ms). Cache
+        tessellated QPainterPaths keyed on quantized yaw/pitch/size; apply bob
+        as a translate in paint. Full visual detail preserved.
+        """
+        # Quantize so tiny sway doesn't thrash; hysteresis via round bins
+        key = (
+            round(self._yaw * 28.0),
+            round((self._pitch_base + self._pitch_sway) * 28.0),
+            int(cx),
+            int(cy),
+            int(scale),
+        )
+        if key == self._geom_key and self._node_proj:
+            return
+        self._geom_key = key
+
+        # Project with bob=0 — paint will translate by screen bob
+        mv = _MESH.verts
+        mesh_path = QPainterPath()
+        for ai, bi in self._mesh_draw_edges:
+            ax, ay, az = mv[ai]
+            bx, by, bz = mv[bi]
+            sa = self._project(ax, ay, az, cx, cy, scale, bob=0.0)
+            sb = self._project(bx, by, bz, cx, cy, scale, bob=0.0)
+            if (sa[2] + sb[2]) * 0.5 < 0.18:
+                continue
+            mesh_path.moveTo(sa[0], sa[1])
+            mesh_path.lineTo(sb[0], sb[1])
+        self._mesh_path = mesh_path
+
+        nodes = self._graph.nodes
+        edges = self._graph.edges
+        proj: list[tuple[float, float, float]] = []
+        for n in nodes:
+            par = (n.layer - 1) * 0.55
+            proj.append(self._project(n.x, n.y, n.z, cx, cy, scale, parallax=par, bob=0.0))
+        self._node_proj = proj
+
+        mid_d: list[float] = []
+        rads: list[float] = []
+        cold = QPainterPath()
+        for e in edges:
+            na, nb = nodes[e.a], nodes[e.b]
+            md = (proj[e.a][2] + proj[e.b][2]) * 0.5
+            mid_d.append(md)
+            rads.append((_radial(na.x, na.y, na.z) + _radial(nb.x, nb.y, nb.z)) * 0.5)
+            # Tessellate every filament into the cold path (hot overlays redraw on top)
+            if abs(e.curl) > 0.18:
+                p0, p1, p2 = self._axon_points(na.x, na.y, na.z, nb.x, nb.y, nb.z, e.curl)
+                s0 = self._project(*p0, cx, cy, scale, bob=0.0)
+                cold.moveTo(s0[0], s0[1])
+                for s in range(1, 5):
+                    tt = s / 4.0
+                    bx, by, bz = self._bezier(p0, p1, p2, tt)
+                    sx, sy, _ = self._project(bx, by, bz, cx, cy, scale, bob=0.0)
+                    cold.lineTo(sx, sy)
+            else:
+                sa, sb = proj[e.a], proj[e.b]
+                cold.moveTo(sa[0], sa[1])
+                cold.lineTo(sb[0], sb[1])
+        self._fil_cold_path = cold
+        self._edge_mid_d = mid_d
+        self._edge_rad = rads
+
     def _paint_brain(self, event) -> None:  # noqa: ARG002
+        import time as _time
+
+        self._paint_t0 = _time.perf_counter()
         painter = QPainter(self)
-        # AA is expensive on Mac; keep for active states, drop when idle-quiet
-        if not self._idle_quiet:
-            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         w, h = self.width(), self.height()
-        cx, cy = w / 2.0, h / 2.0 - h * 0.01 + self._bob * min(w, h) * 0.12
-        # Fit outline wall comfortably in the orb area
+        # Stable center (no bob) — bob applied as translate so geom cache stays valid
+        bob_px = self._bob * min(w, h) * 0.12
+        cx, cy = w / 2.0, h / 2.0 - h * 0.01
         scale = min(w, h) * 0.46
 
         _, _, glow_mul, _ = self._activity()
@@ -1246,8 +1326,8 @@ class OrbVisualizer(QWidget):
 
         painter.setPen(Qt.PenStyle.NoPen)
 
-        # —— Soft contact shadow (float cue) — outside clip ——
-        shadow_y = cy + scale * 0.78
+        # —— Soft contact shadow (float cue) — outside clip, follows bob ——
+        shadow_y = cy + bob_px + scale * 0.78
         sh = QRadialGradient(QPointF(cx, shadow_y), scale * 0.70)
         sh.setColorAt(0.0, QColor(0, 8, 18, _a(55)))
         sh.setColorAt(0.45, QColor(0, 6, 14, _a(22)))
@@ -1255,45 +1335,23 @@ class OrbVisualizer(QWidget):
         painter.setBrush(sh)
         painter.drawEllipse(QPointF(cx, shadow_y), scale * 0.85, scale * 0.16)
 
+        self._ensure_geom_cache(cx, cy, scale)
+
+        painter.save()
+        painter.translate(0.0, bob_px)
+
         # Hard anatomical outer wall — ALL mesh/glow clipped to this path
         wall = _outline_path_projected(
-            lambda x, y, z: self._project(x, y, z, cx, cy, scale)
+            lambda x, y, z: self._project(x, y, z, cx, cy, scale, bob=0.0)
         )
-        painter.save()
         painter.setClipPath(wall, Qt.ClipOperation.IntersectClip)
 
-        # —— 3D mesh wireframe wall (anatomical surface, Y-up) ——
-        # Cache projected lines keyed by quantized yaw/bob/size (avoids 2× project/sort)
-        cache_key = (
-            int(self._yaw * 200),
-            int(self._bob * 400),
-            int(self._pitch_sway * 400),
-            int(cx),
-            int(cy),
-            int(scale),
-        )
-        if cache_key != self._mesh_edge_cache_key:
-            mv = _MESH.verts
-            baked: list[tuple[float, float, float, float, float]] = []
-            for ai, bi in self._mesh_draw_edges:
-                ax, ay, az = mv[ai]
-                bx, by, bz = mv[bi]
-                sa = self._project(ax, ay, az, cx, cy, scale)
-                sb = self._project(bx, by, bz, cx, cy, scale)
-                mid_d = (sa[2] + sb[2]) * 0.5
-                if mid_d < 0.22:
-                    continue
-                baked.append((mid_d, sa[0], sa[1], sb[0], sb[1]))
-            baked.sort(key=lambda t: t[0])
-            self._mesh_edge_cache = baked
-            self._mesh_edge_cache_key = cache_key
+        # —— 3D mesh wireframe wall: ONE batched path + ONE pen (was ~5k pens) ——
         painter.setBrush(Qt.BrushStyle.NoBrush)
-        for mid_d, x0, y0, x1, y1 in self._mesh_edge_cache:
-            a = (28 + 55 * mid_d) * (0.55 + 0.45 * intensity)
-            pen = QPen(QColor(70, 180, 200, _a(a)), 0.70 + 0.35 * mid_d)
-            pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-            painter.setPen(pen)
-            painter.drawLine(QPointF(x0, y0), QPointF(x1, y1))
+        mesh_pen = QPen(QColor(70, 180, 200, _a(55 * (0.55 + 0.45 * intensity))), 0.85)
+        mesh_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        painter.setPen(mesh_pen)
+        painter.drawPath(self._mesh_path)
 
         # Soft volumetric glow inside the wall only
         core_glow = QRadialGradient(QPointF(cx, cy + scale * 0.04), scale * 0.48)
@@ -1303,7 +1361,6 @@ class OrbVisualizer(QWidget):
         painter.setBrush(core_glow)
         painter.drawEllipse(QPointF(cx, cy), scale * 0.50, scale * 0.44)
 
-        # Soft body mass — clipped so it cannot read as a blob outside the wall
         glass = QRadialGradient(QPointF(cx - scale * 0.04, cy - scale * 0.08), scale * 0.72)
         glass.setColorAt(0.0, QColor(70, 160, 195, _a(16 * intensity)))
         glass.setColorAt(0.40, QColor(20, 55, 80, _a(28)))
@@ -1314,11 +1371,7 @@ class OrbVisualizer(QWidget):
 
         nodes = self._graph.nodes
         edges = self._graph.edges
-
-        proj: list[tuple[float, float, float]] = []
-        for n in nodes:
-            par = (n.layer - 1) * 0.55
-            proj.append(self._project(n.x, n.y, n.z, cx, cy, scale, parallax=par))
+        proj = self._node_proj
 
         pulse_on: dict[int, _Pulse] = {}
         for p in self._pulses:
@@ -1326,23 +1379,38 @@ class OrbVisualizer(QWidget):
             if prev is None or p.bright > prev.bright:
                 pulse_on[p.edge] = p
 
-        # —— Dense filament body ——
-        edge_order = list(range(len(edges)))
-        edge_order.sort(key=lambda i: (proj[edges[i].a][2] + proj[edges[i].b][2]) * 0.5)
+        # —— Dense filament body: batched cold path + individual hot overlays ——
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        cold_a = 58 * (0.55 + 0.45 * intensity)
+        cold_pen = QPen(QColor(95, 215, 235, _a(cold_a)), 0.95)
+        cold_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        painter.setPen(cold_pen)
+        painter.drawPath(self._fil_cold_path)
 
-        for ei in edge_order:
+        # Hot / lit / pathway / pulse filaments — full per-edge styling (few dozen)
+        hot_ids = set(pulse_on.keys()) | set(self._lit_edges.keys())
+        # Also flash neighbors
+        for i, n in enumerate(nodes):
+            if n.flash > 0.08:
+                for ei in self._adj.get(i, ()):
+                    hot_ids.add(ei)
+
+        for ei in hot_ids:
+            if ei < 0 or ei >= len(edges):
+                continue
             e = edges[ei]
             na, nb = nodes[e.a], nodes[e.b]
-            mid_d = (proj[e.a][2] + proj[e.b][2]) * 0.5
+            mid_d = self._edge_mid_d[ei] if ei < len(self._edge_mid_d) else 0.5
             flash = max(na.flash, nb.flash)
             lit = self._lit_edges.get(ei, 0.0)
             on_pulse = ei in pulse_on
-            rad = (_radial(na.x, na.y, na.z) + _radial(nb.x, nb.y, nb.z)) * 0.5
+            rad = self._edge_rad[ei] if ei < len(self._edge_rad) else 0.5
             on_path = lit > 0.55 and self._state in (
                 self.LISTENING, self.THINKING, self.SPEAKING
             )
+            if flash < 0.05 and lit < 0.05 and not on_pulse and not on_path:
+                continue
 
-            # Soft DoF: back filaments dimmer / softer
             dof = 0.38 + 0.62 * mid_d
             base_a = (42 + 58 * mid_d) * dof
             base_a += flash * 85
@@ -1350,13 +1418,11 @@ class OrbVisualizer(QWidget):
             if on_pulse:
                 base_a += 95
             if on_path:
-                base_a += 70  # pathway links read as active connections
-            # Cortex edges a touch brighter for silhouette
+                base_a += 70
             if max(na.layer, nb.layer) >= 2:
                 base_a *= 1.12
             base_a *= 0.55 + 0.45 * intensity
 
-            # Inner/stem: finer lines; outer cortex: slightly thicker readable strands
             if rad < 0.45:
                 width = 0.70 + 0.25 * (1.0 - rad)
             else:
@@ -1376,7 +1442,6 @@ class OrbVisualizer(QWidget):
             pen = QPen(QColor(rgb[0], rgb[1], rgb[2], _a(base_a)), width)
             pen.setCapStyle(Qt.PenCapStyle.RoundCap)
             painter.setPen(pen)
-            painter.setBrush(Qt.BrushStyle.NoBrush)
 
             sa = proj[e.a]
             sb = proj[e.b]
@@ -1384,13 +1449,13 @@ class OrbVisualizer(QWidget):
             if use_curve:
                 p0, p1, p2 = self._axon_points(na.x, na.y, na.z, nb.x, nb.y, nb.z, e.curl)
                 path = QPainterPath()
-                s0 = self._project(*p0, cx, cy, scale)
+                s0 = self._project(*p0, cx, cy, scale, bob=0.0)
                 path.moveTo(s0[0], s0[1])
-                steps = 4 if (on_pulse or speaking) else 2
+                steps = 7 if (on_pulse or speaking) else 4
                 for s in range(1, steps + 1):
                     tt = s / steps
                     bx, by, bz = self._bezier(p0, p1, p2, tt)
-                    sx, sy, _ = self._project(bx, by, bz, cx, cy, scale)
+                    sx, sy, _ = self._project(bx, by, bz, cx, cy, scale, bob=0.0)
                     path.lineTo(sx, sy)
                 painter.drawPath(path)
             else:
@@ -1402,12 +1467,12 @@ class OrbVisualizer(QWidget):
                 seg = QPainterPath()
                 t0 = max(0.0, pp.t - 0.18)
                 t1 = min(1.0, pp.t + 0.06)
-                steps = 3
+                steps = 5
                 first = True
                 for s in range(steps + 1):
                     tt = t0 + (t1 - t0) * (s / steps)
                     bx, by, bz = self._bezier(p0, p1, p2, tt)
-                    sx, sy, _ = self._project(bx, by, bz, cx, cy, scale)
+                    sx, sy, _ = self._project(bx, by, bz, cx, cy, scale, bob=0.0)
                     if first:
                         seg.moveTo(sx, sy)
                         first = False
@@ -1426,19 +1491,19 @@ class OrbVisualizer(QWidget):
                 painter.setPen(hpen)
                 painter.drawPath(seg)
 
-        # —— Traveling pulse sparks (tiny, subordinate to filaments) ——
+        # —— Traveling pulse sparks ——
         painter.setPen(Qt.PenStyle.NoPen)
         for p in self._pulses:
             e = edges[p.edge]
             na, nb = nodes[e.a], nodes[e.b]
             p0, p1, p2 = self._axon_points(na.x, na.y, na.z, nb.x, nb.y, nb.z, e.curl)
-            trail_n = 2 if speaking else 1
+            trail_n = 3 if speaking else 2
             for k in range(trail_n, -1, -1):
                 tt = p.t - k * 0.04
                 if tt < 0.0:
                     continue
                 bx, by, bz = self._bezier(p0, p1, p2, tt)
-                sx, sy, depth = self._project(bx, by, bz, cx, cy, scale)
+                sx, sy, depth = self._project(bx, by, bz, cx, cy, scale, bob=0.0)
                 fade = 1.0 - k / (trail_n + 1.2)
                 pr = (1.10 + 0.50 * p.bright) * (0.70 + 0.30 * depth) * fade
                 if k == 0:
@@ -1455,27 +1520,23 @@ class OrbVisualizer(QWidget):
                 painter.setBrush(g)
                 painter.drawEllipse(QPointF(sx, sy), pr * 1.7, pr * 1.7)
 
-        # —— Junction lights: teal glows ONLY at mesh intersections (ref look) ——
+        # —— Junction lights ——
         painter.setPen(Qt.PenStyle.NoPen)
-        # Sort back→front so front junctions bloom over filaments
         node_order = sorted(range(len(nodes)), key=lambda i: proj[i][2])
         for i in node_order:
             n = nodes[i]
             sx, sy, depth = proj[i]
-            # Soft DoF: back junctions dimmer
             if depth < 0.22:
                 continue
-            # Outer cortex: show ~half; mid/deep much sparser (paint cost)
             if n.layer >= 2:
-                show = (i * 11 + 3) % 2 == 0
+                show = True
             elif n.layer == 1:
-                show = (i * 13 + 5) % 4 == 0
+                show = (i * 13 + 5) % 3 != 0
             else:
-                show = (i * 7 + 1) % 6 == 0
-            if not show and n.flash < 0.12:
+                show = (i * 7 + 1) % 4 == 0
+            if not show:
                 continue
 
-            # Size: small teal stars integrated into the web — not big floating discs
             base_r = (1.15 + n.r * 55.0) * (0.55 + 0.45 * depth)
             if n.layer >= 2:
                 base_r *= 1.15
@@ -1487,6 +1548,14 @@ class OrbVisualizer(QWidget):
             a_mul = (0.55 + 0.45 * depth) * intensity
             a_mul *= 0.70 + 0.30 * (1.0 if n.layer >= 2 else 0.55)
             a_mul *= 0.85 + 0.35 * n.flash
+
+            # Cheap path for calm junctions: solid ellipse (no radial gradient)
+            if n.flash < 0.08:
+                painter.setBrush(QColor(_JUNCTION[0], _JUNCTION[1], _JUNCTION[2], _a(70 * a_mul)))
+                painter.drawEllipse(QPointF(sx, sy), aura * 0.55, aura * 0.55)
+                painter.setBrush(QColor(230, 250, 255, _a(140 * a_mul)))
+                painter.drawEllipse(QPointF(sx, sy), max(0.7, base_r * 0.45), max(0.7, base_r * 0.45))
+                continue
 
             g = QRadialGradient(QPointF(sx, sy), aura)
             core = QColor(*_JUNCTION_HOT)
@@ -1500,28 +1569,25 @@ class OrbVisualizer(QWidget):
             g.setColorAt(1.0, QColor(0, 0, 0, 0))
             painter.setBrush(g)
             painter.drawEllipse(QPointF(sx, sy), aura, aura)
-
-            # Tiny hard core so junctions read as points in the mesh
             painter.setBrush(QColor(230, 250, 255, _a((160 + n.flash * 70) * a_mul)))
             painter.drawEllipse(QPointF(sx, sy), max(0.7, base_r * 0.45), max(0.7, base_r * 0.45))
 
-        # —— Outer wall rim: bright cyan boundary so silhouette reads clearly ——
+        # —— Outer wall rim ——
         painter.setBrush(Qt.BrushStyle.NoBrush)
         rim = QPen(QColor(110, 230, 245, _a(110 + 50 * intensity)), 1.8)
         rim.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
         rim.setCapStyle(Qt.PenCapStyle.RoundCap)
         painter.setPen(rim)
         painter.drawPath(wall)
-        # Hotter second pass on wall for speaking
         if speaking:
             rim2 = QPen(QColor(200, 248, 255, _a(120 * intensity)), 2.4)
             rim2.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
             painter.setPen(rim2)
             painter.drawPath(wall)
 
-        painter.restore()  # end hard outline clip
+        painter.setClipping(False)
 
-        # Silhouette stroke outside the fill — keeps the brain wall readable
+        # Silhouette stroke outside the fill
         painter.setBrush(Qt.BrushStyle.NoBrush)
         halo = QPen(QColor(40, 140, 170, _a(50 * intensity)), 3.2)
         halo.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
@@ -1532,16 +1598,19 @@ class OrbVisualizer(QWidget):
         painter.setPen(edge)
         painter.drawPath(wall)
 
+        painter.restore()  # end bob translate
+
         # Soft ambient haze outside (does not reshape the brain)
-        outer = QRadialGradient(QPointF(cx, cy), scale * 1.25)
+        outer = QRadialGradient(QPointF(cx, cy + bob_px), scale * 1.25)
         outer.setColorAt(0.0, QColor(0, 0, 0, 0))
         outer.setColorAt(0.70, QColor(0, 0, 0, 0))
         outer.setColorAt(1.0, QColor(6, 14, 22, _a(24)))
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(outer)
-        painter.drawEllipse(QPointF(cx, cy), scale * 1.25, scale * 1.05)
+        painter.drawEllipse(QPointF(cx, cy + bob_px), scale * 1.25, scale * 1.05)
 
         painter.end()
+        self._last_paint_ms = (_time.perf_counter() - self._paint_t0) * 1000.0
 
 
 # Back-compat aliases
