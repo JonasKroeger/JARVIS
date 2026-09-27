@@ -17,11 +17,16 @@ ollama pull llama3.2
 ## Run (desktop first)
 
 ```bash
-# Primary: desktop window (Iron Man / Stark-style HUD)
-python app.py
+# Primary on macOS: proper .app (Dock / Cmd-Tab / menu bar show "JARVIS")
+./packaging/build_jarvis_app.sh   # once, or after packaging changes
+open -a JARVIS                    # or: ./start_jarvis_hud.sh
 
-# Or double-click run.command on macOS (activates .venv if present, then app.py)
+# Dev fallback (Dock will say "Python"):
+python app.py
+# Or double-click run.command
 ```
+
+The built app lives at `dist/JARVIS.app` and is installed to `~/Applications/JARVIS.app`.
 
 The window is a frameless **cinematic HUD** (default ~1180×740). Status strip uses `SYS // OLLAMA READY`, `SYS // SYNTHESIZING` (waiting on Ollama), `SYS // SPEAKING` (TTS playing), `SYS // LISTENING`. Left side is a multi-layer pulse/radar; right side stacks transcript + transmit bar. Telemetry shows `EL REQ // N` whenever TTS/`speak_async` is invoked. Startup fails fast if the model is missing (suggests `ollama pull …`).
 

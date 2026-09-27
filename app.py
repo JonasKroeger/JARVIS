@@ -621,6 +621,27 @@ def main() -> None:
     try:
         app = QApplication(sys.argv)
         app.setApplicationName("JARVIS")
+        app.setApplicationDisplayName("JARVIS")
+        app.setOrganizationName("jonaskroeger")
+        app.setOrganizationDomain("jonaskroeger.com")
+        # Prefer bundle icon when launched via JARVIS.app
+        try:
+            from PyQt6.QtGui import QIcon
+
+            icns = Path(sys.argv[0]).resolve().parent.parent / "Resources" / "AppIcon.icns"
+            # When argv[0] is app.py (boot rewrite), also try the installed .app
+            candidates = [
+                icns,
+                Path.home() / "Applications" / "JARVIS.app" / "Contents" / "Resources" / "AppIcon.icns",
+                Path(__file__).resolve().parent / "dist" / "JARVIS.app" / "Contents" / "Resources" / "AppIcon.icns",
+                Path(__file__).resolve().parent / "packaging" / "AppIcon.icns",
+            ]
+            for c in candidates:
+                if c.is_file():
+                    app.setWindowIcon(QIcon(str(c)))
+                    break
+        except Exception:  # noqa: BLE001
+            pass
         app.setStyle("Fusion")
         # Avoid accidental Esc quitting the app on some platforms; our shortcut
         # only hides the ghost input. Do not bind Esc to QApplication.quit.

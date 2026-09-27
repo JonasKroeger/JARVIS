@@ -40,3 +40,6 @@ coder_room/PENDING.json
 coder_room/SURFACED.json
 coder_room/TRIGGER
 coder_room/surface.log
+
+# Built Mac app (regenerate with packaging/build_jarvis_app.sh)
+dist/

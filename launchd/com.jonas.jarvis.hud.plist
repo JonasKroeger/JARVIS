@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.jonas.jarvis.hud</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/jonaskroeger/Applications/JARVIS.app/Contents/MacOS/JARVIS</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>/Users/jonaskroeger/JARVIS</string>
+  <key>StandardOutPath</key>
+  <string>/Users/jonaskroeger/JARVIS/jarvis-debug.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/jonaskroeger/JARVIS/jarvis-debug.log</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PYTHONUNBUFFERED</key>
+    <string>1</string>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <false/>
+</dict>
+</plist>
