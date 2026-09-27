@@ -161,7 +161,8 @@ class HudRoot(QWidget):
 
     def paintEvent(self, event) -> None:  # noqa: N802, ARG002
         painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        # AA on thousands of mesh/filament segments is the live-retina killer.
+        # Keep it OFF for batched body; enable only for hot overlays / rim.
         w, h = self.width(), self.height()
         painter.fillRect(0, 0, w, h, QColor(C_BG))
 
@@ -968,10 +969,10 @@ class OrbVisualizer(QWidget):
 
     def _tick(self) -> None:
         # Adaptive cadence: snappier when active, but never faster than paint can finish
-        base = 50 if self._state == self.IDLE else 33
+        base = 55 if self._state == self.IDLE else 40
         # If last paint was heavy, back off so the GUI thread doesn't pile updates
-        interval = max(base, int(self._last_paint_ms * 1.15) + 4)
-        interval = min(interval, 100)  # floor ~10 fps even under load
+        interval = max(base, int(self._last_paint_ms * 1.25) + 6)
+        interval = min(interval, 90)  # floor ~11 fps even under load
         if self._timer.interval() != interval:
             self._timer.setInterval(interval)
         dt = interval / 1000.0
@@ -1398,6 +1399,7 @@ class OrbVisualizer(QWidget):
         painter.drawPath(self._fil_cold_path)
 
         # Hot / lit / pathway / pulse filaments — full per-edge styling (few dozen)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         hot_ids = set(pulse_on.keys()) | set(self._lit_edges.keys())
         # Also flash neighbors
         for i, n in enumerate(nodes):
@@ -1621,6 +1623,18 @@ class OrbVisualizer(QWidget):
 
         painter.end()
         self._last_paint_ms = (_time.perf_counter() - self._paint_t0) * 1000.0
+        self._paint_log_i = getattr(self, "_paint_log_i", 0) + 1
+        if self._paint_log_i % 60 == 1:
+            try:
+                from pathlib import Path as _P
+                with open(_P(__file__).resolve().parent / "jarvis-debug.log", "a", encoding="utf-8") as _f:
+                    _f.write(
+                        f"[paint] ms={self._last_paint_ms:.1f} timer={self._timer.interval()} "
+                        f"state={self._state} size={self.width()}x{self.height()} "
+                        f"pulses={len(self._pulses)} lit={len(self._lit_edges)}\n"
+                    )
+            except Exception:
+                pass
 
 
 # Back-compat aliases
