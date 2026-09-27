@@ -1341,7 +1341,7 @@ class OrbVisualizer(QWidget):
             and not self._pathways
             and not self._lit_edges
         )
-        fb_key = (int(w), int(h), int(self._yaw * 40))
+        fb_key = (int(w) // 8, int(h) // 8, int(round((self._geom_yaw or self._yaw) * 20)))
         if quiet:
             if self._idle_fb is None or self._idle_fb_key != fb_key:
                 fb = QPixmap(max(1, w), max(1, h))
@@ -1368,6 +1368,17 @@ class OrbVisualizer(QWidget):
             painter.drawPixmap(0, int(round(bob_px)), self._idle_fb)
             painter.end()
             self._last_paint_ms = (_time.perf_counter() - self._paint_t0) * 1000.0
+            self._paint_log_i = getattr(self, "_paint_log_i", 0) + 1
+            if self._paint_log_i % 90 == 1:
+                try:
+                    from pathlib import Path as _P
+                    with open(_P(__file__).resolve().parent / "jarvis-debug.log", "a", encoding="utf-8") as _f:
+                        _f.write(
+                            f"[paint] ms={self._last_paint_ms:.1f} timer={self._timer.interval()} "
+                            f"state={self._state} size={w}x{h} blit=1\n"
+                        )
+                except Exception:
+                    pass
             return
 
         painter = QPainter(self)
