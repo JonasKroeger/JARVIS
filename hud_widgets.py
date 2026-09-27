@@ -971,7 +971,8 @@ class OrbVisualizer(QWidget):
             return 6.5, 1.25, 0.95, 34  # question in — start linking
         if self._state == self.THINKING:
             return 12.0, 1.55, 1.12, 48  # actively form pathways
-        return 0.70, 0.55, 0.50, 14
+        # IDLE: no synapse spawn so the brain settles and idle FB blit can stick
+        return 0.0, 0.45, 0.48, 0
 
     def _tick(self) -> None:
         # Adaptive cadence: snappier when active, but never faster than paint can finish
