@@ -1251,9 +1251,8 @@ class OrbVisualizer(QWidget):
         yaw/pitch sway is ignored for the cache (hysteresis) so idle does not
         thrash rebuilds. Full visual detail preserved.
         """
-        # Size key — integer pixels
-        size_key = (int(cx), int(cy), int(scale))
-        # Hysteresis: only rebuild when yaw/pitch drifted enough to matter
+        # Size key — coarse bins so layout jitter / traffic-light chrome does not thrash
+        size_key = (int(cx) // 8, int(cy) // 8, int(scale) // 4)
         yaw_ref = getattr(self, "_geom_yaw", None)
         pitch_ref = getattr(self, "_geom_pitch", None)
         pitch_now = self._pitch_base  # ignore micro pitch_sway for cache
@@ -1305,8 +1304,8 @@ class OrbVisualizer(QWidget):
                 p0, p1, p2 = self._axon_points(na.x, na.y, na.z, nb.x, nb.y, nb.z, e.curl)
                 s0 = self._project(*p0, cx, cy, scale, bob=0.0)
                 cold.moveTo(s0[0], s0[1])
-                for s in range(1, 5):
-                    tt = s / 4.0
+                for s in range(1, 4):
+                    tt = s / 3.0
                     bx, by, bz = self._bezier(p0, p1, p2, tt)
                     sx, sy, _ = self._project(bx, by, bz, cx, cy, scale, bob=0.0)
                     cold.lineTo(sx, sy)
