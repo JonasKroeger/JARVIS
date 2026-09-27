@@ -928,6 +928,9 @@ class OrbVisualizer(QWidget):
         self._edge_rad: list[float] = []
         self._last_paint_ms = 16.0
         self._paint_t0 = 0.0
+        self._idle_fb = None
+        self._idle_fb_key = None
+        self._painting_to_fb = False
 
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._tick)
@@ -936,6 +939,8 @@ class OrbVisualizer(QWidget):
     def set_state(self, state: str) -> None:
         prev = self._state
         self._state = state or self.IDLE
+        self._idle_fb = None
+        self._idle_fb_key = None
         # Entering a question/think phase: kick pathway growth
         if self._state in (self.LISTENING, self.THINKING) and prev not in (
             self.LISTENING,
@@ -946,6 +951,8 @@ class OrbVisualizer(QWidget):
         if self._state == self.IDLE and prev in (self.SPEAKING, self.THINKING, self.LISTENING):
             for pw in self._pathways:
                 pw["life"] = min(pw.get("life", 1.0), 0.45)
+        if self._state != self.IDLE or self._pulses or self._pathways or self._lit_edges:
+            self._idle_fb = None
         self.update()
 
     def _build_adjacency(self) -> dict[int, list[int]]:
@@ -968,7 +975,7 @@ class OrbVisualizer(QWidget):
 
     def _tick(self) -> None:
         # Adaptive cadence: snappier when active, but never faster than paint can finish
-        base = 55 if self._state == self.IDLE else 40
+        base = 70 if self._state == self.IDLE else 40
         # If last paint was heavy, back off so the GUI thread doesn't pile updates
         interval = max(base, int(self._last_paint_ms * 1.25) + 6)
         interval = min(interval, 90)  # floor ~11 fps even under load
@@ -1318,14 +1325,52 @@ class OrbVisualizer(QWidget):
 
     def _paint_brain(self, event) -> None:  # noqa: ARG002
         import time as _time
+        from PyQt6.QtGui import QPixmap
 
         self._paint_t0 = _time.perf_counter()
-        painter = QPainter(self)
-        # AA off for huge batched paths (retina killer); on for hot overlays.
         w, h = self.width(), self.height()
         bob_px = self._bob * min(w, h) * 0.12
         cx, cy = w / 2.0, h / 2.0 - h * 0.01
         scale = min(w, h) * 0.46
+
+        quiet = (
+            not self._painting_to_fb
+            and self._state == self.IDLE
+            and not self._pulses
+            and not self._pathways
+            and not self._lit_edges
+        )
+        fb_key = (int(w), int(h), int(self._yaw * 40))
+        if quiet:
+            if self._idle_fb is None or self._idle_fb_key != fb_key:
+                fb = QPixmap(max(1, w), max(1, h))
+                fb.fill(QColor(0, 0, 0, 0))
+                saved = self._bob
+                self._bob = 0.0
+                self._painting_to_fb = True
+                try:
+                    self.render(fb)
+                finally:
+                    self._painting_to_fb = False
+                    self._bob = saved
+                self._idle_fb = fb
+                self._idle_fb_key = fb_key
+            painter = QPainter(self)
+            painter.setPen(Qt.PenStyle.NoPen)
+            shadow_y = cy + bob_px + scale * 0.78
+            sh = QRadialGradient(QPointF(cx, shadow_y), scale * 0.70)
+            sh.setColorAt(0.0, QColor(0, 8, 18, _a(55)))
+            sh.setColorAt(0.45, QColor(0, 6, 14, _a(22)))
+            sh.setColorAt(1.0, QColor(0, 0, 0, 0))
+            painter.setBrush(sh)
+            painter.drawEllipse(QPointF(cx, shadow_y), scale * 0.85, scale * 0.16)
+            painter.drawPixmap(0, int(round(bob_px)), self._idle_fb)
+            painter.end()
+            self._last_paint_ms = (_time.perf_counter() - self._paint_t0) * 1000.0
+            return
+
+        painter = QPainter(self)
+        # AA off for huge batched paths (retina killer); on for hot overlays.
 
         _, _, glow_mul, _ = self._activity()
         breathe = 0.90 + 0.10 * (0.5 + 0.5 * math.sin(self._phase * 1.05))
