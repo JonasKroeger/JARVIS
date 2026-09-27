@@ -4,6 +4,11 @@
 Waits until a pending user/jarvis handoff exists, writes SURFACED.json,
 prints JSON, exits. Parent must answer via room_reply.py (+ group SendToAgent).
 
+NOTE: Writing SURFACED.json alone does NOT wake Grok Bot Coder. Automatic parent
+wake requires the room server notify webhook (`CODER_ROOM_NOTIFY_URL` +
+`CODER_ROOM_NOTIFY_AUTH` in ~/JARVIS/.env, sourced by start_coder_room.sh).
+This watcher is a local fallback / debug surface only.
+
   .venv/bin/python coder_room_surface.py --wait 600
   .venv/bin/python coder_room_surface.py --if-pending
 """

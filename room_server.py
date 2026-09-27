@@ -415,6 +415,32 @@ def _notify_url() -> str | None:
     return url or None
 
 
+def _notify_auth_header() -> str | None:
+    """Authorization value for the wake webhook (or None).
+
+    Env (either):
+      CODER_ROOM_NOTIFY_HEADER — full ``Authorization: …`` line (or just the value)
+      CODER_ROOM_NOTIFY_AUTH   — header value (``Bearer …`` / ``Basic …``) OR raw
+                                 token (prefixed with ``Bearer `` when it does not
+                                 already start with Bearer/Basic)
+    """
+    header_line = os.environ.get("CODER_ROOM_NOTIFY_HEADER", "").strip()
+    if header_line:
+        if header_line.lower().startswith("authorization:"):
+            value = header_line.split(":", 1)[1].strip()
+        else:
+            value = header_line
+        return value or None
+
+    auth = os.environ.get("CODER_ROOM_NOTIFY_AUTH", "").strip()
+    if not auth:
+        return None
+    lower = auth.lower()
+    if not (lower.startswith("bearer ") or lower.startswith("basic ")):
+        auth = f"Bearer {auth}"
+    return auth
+
+
 def _fire_notify(msg: dict[str, Any], log: _LogFn) -> None:
     url = _notify_url()
     if not url:
@@ -438,11 +464,18 @@ def _fire_notify(msg: dict[str, Any], log: _LogFn) -> None:
                     "group_hint": f"Also SendToAgent group {GROUP_ID}",
                 }
             ).encode("utf-8")
+            headers = {
+                "Content-Type": "application/json",
+                "User-Agent": "jarvis-coder-room-notify/1",
+            }
+            auth = _notify_auth_header()
+            if auth:
+                headers["Authorization"] = auth
             req = urllib.request.Request(
                 url,
                 data=payload,
                 method="POST",
-                headers={"Content-Type": "application/json"},
+                headers=headers,
             )
             with urllib.request.urlopen(req, timeout=10) as resp:
                 resp.read()

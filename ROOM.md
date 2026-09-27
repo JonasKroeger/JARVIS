@@ -48,8 +48,25 @@ On each **user/jarvis** handoff the server writes:
 - `coder_room/PENDING.json`
 - `coder_room/TRIGGER`
 - optional `POST` to `CODER_ROOM_NOTIFY_URL` / `CODER_BRIDGE_NOTIFY_URL`
+  (with `Authorization` from `CODER_ROOM_NOTIFY_AUTH` or `CODER_ROOM_NOTIFY_HEADER`)
 
-It does **not** post a coder reply.
+It does **not** post a coder reply. Surface files alone do **not** wake Grok Bot
+Coder — the notify webhook is required for automatic parent wake.
+
+### Wake webhook secrets (`.env`)
+
+LaunchAgent `EnvironmentVariables` is **not** enough for secrets. `start_coder_room.sh`
+sources `~/JARVIS/.env` (gitignored) so these load on every start/restart:
+
+```
+# ~/JARVIS/.env  (gitignored)
+CODER_ROOM_NOTIFY_URL=<Webhook URL from Grok Bot routine jarvis-coder-mailbox>
+CODER_ROOM_NOTIFY_AUTH=<Authorization header value from that routine panel>
+```
+
+Optional: `CODER_ROOM_NOTIFY_HEADER` as a full `Authorization: …` line (same value).
+Do **not** invent URL/key — copy from the Grok Bot routine panel. Until set,
+`/health` reports `notify_url_configured: false` (SURFACED.json only).
 
 ### Start
 
