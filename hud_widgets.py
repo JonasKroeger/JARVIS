@@ -919,6 +919,8 @@ class OrbVisualizer(QWidget):
         self._mesh_draw_edges = list(_MESH.edges)
         # Camera-stable geometry cache (rebuild on yaw/size change; bob via translate)
         self._geom_key = None
+        self._geom_yaw = None
+        self._geom_pitch = None
         self._mesh_path = QPainterPath()
         self._fil_cold_path = QPainterPath()  # dim filaments tessellated in screen space
         self._node_proj: list[tuple[float, float, float]] = []
@@ -1244,20 +1246,28 @@ class OrbVisualizer(QWidget):
 
         Root cause of lag: every paintEvent re-projected ~5k mesh edges (twice)
         and issued ~5k+/1.4k individual QPen+drawLine calls (~78ms). Cache
-        tessellated QPainterPaths keyed on quantized yaw/pitch/size; apply bob
-        as a translate in paint. Full visual detail preserved.
+        tessellated QPainterPaths; apply bob as a translate in paint. Tiny
+        yaw/pitch sway is ignored for the cache (hysteresis) so idle does not
+        thrash rebuilds. Full visual detail preserved.
         """
-        # Quantize so tiny sway doesn't thrash; hysteresis via round bins
-        key = (
-            round(self._yaw * 28.0),
-            round((self._pitch_base + self._pitch_sway) * 28.0),
-            int(cx),
-            int(cy),
-            int(scale),
+        # Size key — integer pixels
+        size_key = (int(cx), int(cy), int(scale))
+        # Hysteresis: only rebuild when yaw/pitch drifted enough to matter
+        yaw_ref = getattr(self, "_geom_yaw", None)
+        pitch_ref = getattr(self, "_geom_pitch", None)
+        pitch_now = self._pitch_base  # ignore micro pitch_sway for cache
+        need = (
+            self._geom_key != size_key
+            or not self._node_proj
+            or yaw_ref is None
+            or abs(self._yaw - yaw_ref) > 0.045
+            or abs(pitch_now - pitch_ref) > 0.05
         )
-        if key == self._geom_key and self._node_proj:
+        if not need:
             return
-        self._geom_key = key
+        self._geom_key = size_key
+        self._geom_yaw = self._yaw
+        self._geom_pitch = pitch_now
 
         # Project with bob=0 — paint will translate by screen bob
         mv = _MESH.verts
