@@ -295,8 +295,7 @@ class CaptionStack(QWidget):
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.setMinimumHeight(48)
-        self.setMaximumHeight(100)
+        self.setFixedHeight(56)  # fixed: variable caption height was resizing the orb
         lay = QVBoxLayout(self)
         lay.setContentsMargins(36, 2, 36, 0)
         lay.setSpacing(0)
@@ -1349,11 +1348,12 @@ class OrbVisualizer(QWidget):
         painter.save()
         painter.translate(0.0, bob_px)
 
-        # If size drifted since bake, map cached screen paths into current size
+        # Map cached paths only if size drifted (caption height is now fixed)
         c_scale = self._cache_scale or scale
         c_cx, c_cy = self._cache_cx, self._cache_cy
-        size_drift = abs(scale - c_scale) > 0.5 or abs(cx - c_cx) > 1.0 or abs(cy - c_cy) > 1.0
-        if size_drift and c_scale > 1e-3:
+        if c_scale > 1e-3 and (
+            abs(scale - c_scale) > 2.0 or abs(cx - c_cx) > 4.0 or abs(cy - c_cy) > 4.0
+        ):
             painter.translate(cx, cy)
             painter.scale(scale / c_scale, scale / c_scale)
             painter.translate(-c_cx, -c_cy)
