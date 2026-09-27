@@ -1243,33 +1243,30 @@ class OrbVisualizer(QWidget):
         )
 
     def _ensure_geom_cache(self, cx: float, cy: float, scale: float) -> None:
-        """Rebuild screen-space mesh/filament paths when camera (not bob) changes.
+        """Rebuild screen-space mesh/filament paths when yaw changes (not size).
 
-        Root cause of lag: every paintEvent re-projected ~5k mesh edges (twice)
-        and issued ~5k+/1.4k individual QPen+drawLine calls (~78ms). Cache
-        tessellated QPainterPaths; apply bob as a translate in paint. Tiny
-        yaw/pitch sway is ignored for the cache (hysteresis) so idle does not
-        thrash rebuilds. Full visual detail preserved.
+        Layout jitter was resizing the orb (720↔700) every frame and thrashing
+        a size-keyed cache (~1.2s rebuild → 100% CPU). Cache is keyed on yaw
+        only; if the widget size changes we map the cached paths with a
+        QTransform so detail stays sharp without rebuilding.
         """
-        # Size key — coarse bins so layout jitter / traffic-light chrome does not thrash
-        size_key = (int(cx) // 8, int(cy) // 8, int(scale) // 4)
         yaw_ref = getattr(self, "_geom_yaw", None)
+        pitch_now = self._pitch_base
         pitch_ref = getattr(self, "_geom_pitch", None)
-        pitch_now = self._pitch_base  # ignore micro pitch_sway for cache
         need = (
-            self._geom_key != size_key
-            or not self._node_proj
+            not self._node_proj
             or yaw_ref is None
             or abs(self._yaw - yaw_ref) > 0.045
             or abs(pitch_now - pitch_ref) > 0.05
         )
         if not need:
             return
-        self._geom_key = size_key
         self._geom_yaw = self._yaw
         self._geom_pitch = pitch_now
+        self._cache_cx = cx
+        self._cache_cy = cy
+        self._cache_scale = scale
 
-        # Project with bob=0 — paint will translate by screen bob
         mv = _MESH.verts
         mesh_path = QPainterPath()
         for ai, bi in self._mesh_draw_edges:
@@ -1299,7 +1296,6 @@ class OrbVisualizer(QWidget):
             md = (proj[e.a][2] + proj[e.b][2]) * 0.5
             mid_d.append(md)
             rads.append((_radial(na.x, na.y, na.z) + _radial(nb.x, nb.y, nb.z)) * 0.5)
-            # Tessellate every filament into the cold path (hot overlays redraw on top)
             if abs(e.curl) > 0.18:
                 p0, p1, p2 = self._axon_points(na.x, na.y, na.z, nb.x, nb.y, nb.z, e.curl)
                 s0 = self._project(*p0, cx, cy, scale, bob=0.0)
@@ -1316,15 +1312,18 @@ class OrbVisualizer(QWidget):
         self._fil_cold_path = cold
         self._edge_mid_d = mid_d
         self._edge_rad = rads
+        # Wall outline in the same cache space
+        self._wall_path = _outline_path_projected(
+            lambda x, y, z: self._project(x, y, z, cx, cy, scale, bob=0.0)
+        )
 
     def _paint_brain(self, event) -> None:  # noqa: ARG002
         import time as _time
 
         self._paint_t0 = _time.perf_counter()
         painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        # AA off for huge batched paths (retina killer); on for hot overlays.
         w, h = self.width(), self.height()
-        # Stable center (no bob) — bob applied as translate so geom cache stays valid
         bob_px = self._bob * min(w, h) * 0.12
         cx, cy = w / 2.0, h / 2.0 - h * 0.01
         scale = min(w, h) * 0.46
@@ -1336,7 +1335,7 @@ class OrbVisualizer(QWidget):
 
         painter.setPen(Qt.PenStyle.NoPen)
 
-        # —— Soft contact shadow (float cue) — outside clip, follows bob ——
+        # Soft contact shadow
         shadow_y = cy + bob_px + scale * 0.78
         sh = QRadialGradient(QPointF(cx, shadow_y), scale * 0.70)
         sh.setColorAt(0.0, QColor(0, 8, 18, _a(55)))
@@ -1350,34 +1349,40 @@ class OrbVisualizer(QWidget):
         painter.save()
         painter.translate(0.0, bob_px)
 
-        # Hard anatomical outer wall — ALL mesh/glow clipped to this path
-        wall = _outline_path_projected(
-            lambda x, y, z: self._project(x, y, z, cx, cy, scale, bob=0.0)
-        )
+        # If size drifted since bake, map cached screen paths into current size
+        c_scale = self._cache_scale or scale
+        c_cx, c_cy = self._cache_cx, self._cache_cy
+        size_drift = abs(scale - c_scale) > 0.5 or abs(cx - c_cx) > 1.0 or abs(cy - c_cy) > 1.0
+        if size_drift and c_scale > 1e-3:
+            painter.translate(cx, cy)
+            painter.scale(scale / c_scale, scale / c_scale)
+            painter.translate(-c_cx, -c_cy)
+
+        wall = self._wall_path
         painter.setClipPath(wall, Qt.ClipOperation.IntersectClip)
 
-        # —— 3D mesh wireframe wall: ONE batched path + ONE pen (was ~5k pens) ——
+        # Batched mesh (no AA)
         painter.setBrush(Qt.BrushStyle.NoBrush)
         mesh_pen = QPen(QColor(70, 180, 200, _a(55 * (0.55 + 0.45 * intensity))), 0.85)
         mesh_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
         painter.setPen(mesh_pen)
         painter.drawPath(self._mesh_path)
 
-        # Soft volumetric glow inside the wall only
-        core_glow = QRadialGradient(QPointF(cx, cy + scale * 0.04), scale * 0.48)
+        # Volumetric glow — use cache-space center
+        core_glow = QRadialGradient(QPointF(c_cx, c_cy + c_scale * 0.04), c_scale * 0.48)
         core_glow.setColorAt(0.0, QColor(40, 90, 110, _a(40 * intensity)))
         core_glow.setColorAt(0.45, QColor(20, 55, 75, _a(16 * intensity)))
         core_glow.setColorAt(1.0, QColor(0, 0, 0, 0))
         painter.setBrush(core_glow)
-        painter.drawEllipse(QPointF(cx, cy), scale * 0.50, scale * 0.44)
+        painter.drawEllipse(QPointF(c_cx, c_cy), c_scale * 0.50, c_scale * 0.44)
 
-        glass = QRadialGradient(QPointF(cx - scale * 0.04, cy - scale * 0.08), scale * 0.72)
+        glass = QRadialGradient(QPointF(c_cx - c_scale * 0.04, c_cy - c_scale * 0.08), c_scale * 0.72)
         glass.setColorAt(0.0, QColor(70, 160, 195, _a(16 * intensity)))
         glass.setColorAt(0.40, QColor(20, 55, 80, _a(28)))
         glass.setColorAt(0.75, QColor(8, 22, 36, _a(36)))
         glass.setColorAt(1.0, QColor(0, 0, 0, 0))
         painter.setBrush(glass)
-        painter.drawEllipse(QPointF(cx, cy - scale * 0.02), scale * 0.70, scale * 0.56)
+        painter.drawEllipse(QPointF(c_cx, c_cy - c_scale * 0.02), c_scale * 0.70, c_scale * 0.56)
 
         nodes = self._graph.nodes
         edges = self._graph.edges
@@ -1389,7 +1394,7 @@ class OrbVisualizer(QWidget):
             if prev is None or p.bright > prev.bright:
                 pulse_on[p.edge] = p
 
-        # —— Dense filament body: batched cold path + individual hot overlays ——
+        # Cold filaments batched (no AA)
         painter.setBrush(Qt.BrushStyle.NoBrush)
         cold_a = 58 * (0.55 + 0.45 * intensity)
         cold_pen = QPen(QColor(95, 215, 235, _a(cold_a)), 0.95)
@@ -1397,15 +1402,16 @@ class OrbVisualizer(QWidget):
         painter.setPen(cold_pen)
         painter.drawPath(self._fil_cold_path)
 
-        # Hot / lit / pathway / pulse filaments — full per-edge styling (few dozen)
+        # Hot overlays (AA on)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         hot_ids = set(pulse_on.keys()) | set(self._lit_edges.keys())
-        # Also flash neighbors
         for i, n in enumerate(nodes):
             if n.flash > 0.08:
                 for ei in self._adj.get(i, ()):
                     hot_ids.add(ei)
 
+        # Hot drawing uses cache-space projection (proj / reproject with cache cx,cy,scale)
+        pcx, pcy, pscale = c_cx, c_cy, c_scale
         for ei in hot_ids:
             if ei < 0 or ei >= len(edges):
                 continue
@@ -1423,9 +1429,7 @@ class OrbVisualizer(QWidget):
                 continue
 
             dof = 0.38 + 0.62 * mid_d
-            base_a = (42 + 58 * mid_d) * dof
-            base_a += flash * 85
-            base_a += lit * 105
+            base_a = (42 + 58 * mid_d) * dof + flash * 85 + lit * 105
             if on_pulse:
                 base_a += 95
             if on_path:
@@ -1460,13 +1464,13 @@ class OrbVisualizer(QWidget):
             if use_curve:
                 p0, p1, p2 = self._axon_points(na.x, na.y, na.z, nb.x, nb.y, nb.z, e.curl)
                 path = QPainterPath()
-                s0 = self._project(*p0, cx, cy, scale, bob=0.0)
+                s0 = self._project(*p0, pcx, pcy, pscale, bob=0.0)
                 path.moveTo(s0[0], s0[1])
                 steps = 7 if (on_pulse or speaking) else 4
                 for s in range(1, steps + 1):
                     tt = s / steps
                     bx, by, bz = self._bezier(p0, p1, p2, tt)
-                    sx, sy, _ = self._project(bx, by, bz, cx, cy, scale, bob=0.0)
+                    sx, sy, _ = self._project(bx, by, bz, pcx, pcy, pscale, bob=0.0)
                     path.lineTo(sx, sy)
                 painter.drawPath(path)
             else:
@@ -1478,12 +1482,11 @@ class OrbVisualizer(QWidget):
                 seg = QPainterPath()
                 t0 = max(0.0, pp.t - 0.18)
                 t1 = min(1.0, pp.t + 0.06)
-                steps = 5
                 first = True
-                for s in range(steps + 1):
-                    tt = t0 + (t1 - t0) * (s / steps)
+                for s in range(6):
+                    tt = t0 + (t1 - t0) * (s / 5)
                     bx, by, bz = self._bezier(p0, p1, p2, tt)
-                    sx, sy, _ = self._project(bx, by, bz, cx, cy, scale, bob=0.0)
+                    sx, sy, _ = self._project(bx, by, bz, pcx, pcy, pscale, bob=0.0)
                     if first:
                         seg.moveTo(sx, sy)
                         first = False
@@ -1502,7 +1505,7 @@ class OrbVisualizer(QWidget):
                 painter.setPen(hpen)
                 painter.drawPath(seg)
 
-        # —— Traveling pulse sparks ——
+        # Pulse sparks
         painter.setPen(Qt.PenStyle.NoPen)
         for p in self._pulses:
             e = edges[p.edge]
@@ -1514,7 +1517,7 @@ class OrbVisualizer(QWidget):
                 if tt < 0.0:
                     continue
                 bx, by, bz = self._bezier(p0, p1, p2, tt)
-                sx, sy, depth = self._project(bx, by, bz, cx, cy, scale, bob=0.0)
+                sx, sy, depth = self._project(bx, by, bz, pcx, pcy, pscale, bob=0.0)
                 fade = 1.0 - k / (trail_n + 1.2)
                 pr = (1.10 + 0.50 * p.bright) * (0.70 + 0.30 * depth) * fade
                 if k == 0:
@@ -1531,7 +1534,7 @@ class OrbVisualizer(QWidget):
                 painter.setBrush(g)
                 painter.drawEllipse(QPointF(sx, sy), pr * 1.7, pr * 1.7)
 
-        # —— Junction lights ——
+        # Junctions
         painter.setPen(Qt.PenStyle.NoPen)
         node_order = sorted(range(len(nodes)), key=lambda i: proj[i][2])
         for i in node_order:
@@ -1547,43 +1550,35 @@ class OrbVisualizer(QWidget):
                 show = (i * 7 + 1) % 4 == 0
             if not show:
                 continue
-
             base_r = (1.15 + n.r * 55.0) * (0.55 + 0.45 * depth)
-            if n.layer >= 2:
-                base_r *= 1.15
-            else:
-                base_r *= 0.75
+            base_r *= 1.15 if n.layer >= 2 else 0.75
             base_r += n.flash * 1.4
             aura = base_r * (2.6 + 0.8 * n.flash)
-
             a_mul = (0.55 + 0.45 * depth) * intensity
             a_mul *= 0.70 + 0.30 * (1.0 if n.layer >= 2 else 0.55)
             a_mul *= 0.85 + 0.35 * n.flash
-
-            # Cheap path for calm junctions: solid ellipse (no radial gradient)
             if n.flash < 0.08:
                 painter.setBrush(QColor(_JUNCTION[0], _JUNCTION[1], _JUNCTION[2], _a(70 * a_mul)))
                 painter.drawEllipse(QPointF(sx, sy), aura * 0.55, aura * 0.55)
                 painter.setBrush(QColor(230, 250, 255, _a(140 * a_mul)))
                 painter.drawEllipse(QPointF(sx, sy), max(0.7, base_r * 0.45), max(0.7, base_r * 0.45))
                 continue
-
             g = QRadialGradient(QPointF(sx, sy), aura)
             core = QColor(*_JUNCTION_HOT)
             core.setAlpha(_a((175 + n.flash * 60) * a_mul))
             mid = QColor(*_JUNCTION)
             mid.setAlpha(_a((90 + n.flash * 50) * a_mul))
-            rim = QColor(40, 160, 180, _a((28 + n.flash * 25) * a_mul))
+            rimc = QColor(40, 160, 180, _a((28 + n.flash * 25) * a_mul))
             g.setColorAt(0.0, core)
             g.setColorAt(0.28, mid)
-            g.setColorAt(0.65, rim)
+            g.setColorAt(0.65, rimc)
             g.setColorAt(1.0, QColor(0, 0, 0, 0))
             painter.setBrush(g)
             painter.drawEllipse(QPointF(sx, sy), aura, aura)
             painter.setBrush(QColor(230, 250, 255, _a((160 + n.flash * 70) * a_mul)))
             painter.drawEllipse(QPointF(sx, sy), max(0.7, base_r * 0.45), max(0.7, base_r * 0.45))
 
-        # —— Outer wall rim ——
+        # Wall rim
         painter.setBrush(Qt.BrushStyle.NoBrush)
         rim = QPen(QColor(110, 230, 245, _a(110 + 50 * intensity)), 1.8)
         rim.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
@@ -1597,9 +1592,6 @@ class OrbVisualizer(QWidget):
             painter.drawPath(wall)
 
         painter.setClipping(False)
-
-        # Silhouette stroke outside the fill
-        painter.setBrush(Qt.BrushStyle.NoBrush)
         halo = QPen(QColor(40, 140, 170, _a(50 * intensity)), 3.2)
         halo.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
         painter.setPen(halo)
@@ -1609,9 +1601,8 @@ class OrbVisualizer(QWidget):
         painter.setPen(edge)
         painter.drawPath(wall)
 
-        painter.restore()  # end bob translate
+        painter.restore()
 
-        # Soft ambient haze outside (does not reshape the brain)
         outer = QRadialGradient(QPointF(cx, cy + bob_px), scale * 1.25)
         outer.setColorAt(0.0, QColor(0, 0, 0, 0))
         outer.setColorAt(0.70, QColor(0, 0, 0, 0))
