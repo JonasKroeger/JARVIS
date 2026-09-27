@@ -1,10 +1,12 @@
-"""JARVIS HUD — procedural lateral filament brain with hard anatomical outline wall."""
+"""JARVIS HUD — 3D anatomical brain mesh wall + procedural cyan filaments + think pathways."""
 
 from __future__ import annotations
 
 import json
 import math
 import random
+
+import numpy as np
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -361,67 +363,94 @@ class CaptionStack(QWidget):
 # ── Procedural neural brain (lateral anatomical silhouette) ───────────
 
 
-# ── Hard lateral brain outline (from ref silhouette — clip/boundary ONLY) ──
+# ── 3D anatomical brain mesh (CC BY FrankJohansson) — hard wall + occupancy ──
 
-# Fallback closed polygon in (z, y): z=anterior+, y=superior+.
-# Extracted from assets/brain-ref-side.png; photo itself is never painted.
-_FALLBACK_OUTLINE_ZY: list[tuple[float, float]] = [
-    (0.15, 0.58), (0.1, 0.5933), (0.05, 0.6067), (0.0, 0.62),
-    (-0.05, 0.6133), (-0.1, 0.6067), (-0.15, 0.6), (-0.2, 0.5833),
-    (-0.25, 0.5667), (-0.3, 0.55), (-0.34, 0.5267), (-0.38, 0.5033),
-    (-0.42, 0.48), (-0.4533, 0.4467), (-0.4867, 0.4133), (-0.52, 0.38),
-    (-0.5467, 0.34), (-0.5733, 0.3), (-0.6, 0.26), (-0.62, 0.2133),
-    (-0.64, 0.1667), (-0.66, 0.12), (-0.6733, 0.08), (-0.6867, 0.04),
-    (-0.7, 0.0), (-0.7067, -0.04), (-0.7133, -0.08), (-0.72, -0.12),
-    (-0.7133, -0.16), (-0.7067, -0.2), (-0.7, -0.24), (-0.6867, -0.2733),
-    (-0.6733, -0.3067), (-0.66, -0.34), (-0.6467, -0.3667), (-0.6333, -0.3933),
-    (-0.62, -0.42), (-0.6067, -0.4467), (-0.5933, -0.4733), (-0.58, -0.5),
-    (-0.5533, -0.52), (-0.5267, -0.54), (-0.5, -0.56), (-0.4667, -0.5667),
-    (-0.4333, -0.5733), (-0.4, -0.58), (-0.3733, -0.5733), (-0.3467, -0.5667),
-    (-0.32, -0.56), (-0.3067, -0.54), (-0.2933, -0.52), (-0.28, -0.5),
-    (-0.26, -0.5067), (-0.24, -0.5133), (-0.22, -0.52), (-0.2, -0.5467),
-    (-0.18, -0.5733), (-0.16, -0.6), (-0.1467, -0.6333), (-0.1333, -0.6667),
-    (-0.12, -0.7), (-0.1067, -0.7267), (-0.0933, -0.7533), (-0.08, -0.78),
-    (-0.06, -0.7933), (-0.04, -0.8067), (-0.02, -0.82), (-0.0, -0.8067),
-    (0.02, -0.7933), (0.04, -0.78), (0.0467, -0.7467), (0.0533, -0.7133),
-    (0.06, -0.68), (0.0533, -0.6467), (0.0467, -0.6133), (0.04, -0.58),
-    (0.0533, -0.5533), (0.0667, -0.5267), (0.08, -0.5), (0.1133, -0.4867),
-    (0.1467, -0.4733), (0.18, -0.46), (0.22, -0.4467), (0.26, -0.4333),
-    (0.3, -0.42), (0.34, -0.4), (0.38, -0.38), (0.42, -0.36),
-    (0.4533, -0.3333), (0.4867, -0.3067), (0.52, -0.28), (0.5467, -0.2467),
-    (0.5733, -0.2133), (0.6, -0.18), (0.62, -0.14), (0.64, -0.1),
-    (0.66, -0.06), (0.6733, -0.02), (0.6867, 0.02), (0.7, 0.06),
-    (0.6933, 0.1), (0.6867, 0.14), (0.68, 0.18), (0.66, 0.22),
-    (0.64, 0.26), (0.62, 0.3), (0.5867, 0.3333), (0.5533, 0.3667),
-    (0.52, 0.4), (0.48, 0.4267), (0.44, 0.4533), (0.4, 0.48),
-    (0.36, 0.5), (0.32, 0.52), (0.28, 0.54), (0.2367, 0.5533),
-    (0.1933, 0.5667), (0.15, 0.58),
-]
+@dataclass
+class _BrainMesh:
+    """Loaded decimated pial-style mesh: verts, wire edges, occupancy, ZY silhouette."""
+
+    verts: list[tuple[float, float, float]]
+    edges: list[tuple[int, int]]
+    faces: list[tuple[int, int, int]]
+    occ: object  # np.ndarray uint8 [G,G,G]
+    occ_g: int
+    outline_zy: list[tuple[float, float]]
 
 
-def _load_outline_zy() -> list[tuple[float, float]]:
-    """Load closed (z,y) silhouette; JSON preferred, embedded fallback otherwise."""
-    p = Path(__file__).resolve().parent / "assets" / "brain_outline_side.json"
-    try:
-        data = json.loads(p.read_text(encoding="utf-8"))
-        poly = [(float(a), float(b)) for a, b in data["poly_zy"]]
-        if len(poly) >= 8:
-            if poly[0] != poly[-1]:
-                poly.append(poly[0])
-            return poly
-    except Exception:  # noqa: BLE001
-        pass
-    poly = list(_FALLBACK_OUTLINE_ZY)
-    if poly[0] != poly[-1]:
-        poly.append(poly[0])
-    return poly
+def _load_brain_mesh() -> _BrainMesh:
+    """Prefer baked npz; fall back to OBJ; last resort tiny ellipsoid."""
+    root = Path(__file__).resolve().parent / "assets"
+    npz_p = root / "brain_mesh.npz"
+    obj_p = root / "brain_mesh.obj"
+    if npz_p.is_file():
+        data = np.load(npz_p)
+        verts = [tuple(map(float, v)) for v in data["verts"]]
+        edges = [tuple(map(int, e)) for e in data["edges"]]
+        faces = [tuple(map(int, f)) for f in data["faces"]]
+        outline = [tuple(map(float, p)) for p in data["outline_zy"]]
+        if outline and outline[0] != outline[-1]:
+            outline.append(outline[0])
+        return _BrainMesh(
+            verts=verts,
+            edges=edges,
+            faces=faces,
+            occ=data["occ"],
+            occ_g=int(data["occ_g"]),
+            outline_zy=outline,
+        )
+    # Minimal OBJ parse
+    if obj_p.is_file():
+        verts_f: list[tuple[float, float, float]] = []
+        faces_i: list[tuple[int, int, int]] = []
+        for line in obj_p.read_text(encoding="utf-8").splitlines():
+            if line.startswith("v "):
+                p = line.split()
+                verts_f.append((float(p[1]), float(p[2]), float(p[3])))
+            elif line.startswith("f "):
+                idxs = [int(t.split("/")[0]) - 1 for t in line.split()[1:]]
+                for i in range(1, len(idxs) - 1):
+                    faces_i.append((idxs[0], idxs[i], idxs[i + 1]))
+        edge_set: set[tuple[int, int]] = set()
+        for a, b, c in faces_i:
+            for u, v in ((a, b), (b, c), (c, a)):
+                edge_set.add((u, v) if u < v else (v, u))
+        # crude outline via angular bins in ZY
+        import math as _m
+        cy = sum(v[1] for v in verts_f) / max(1, len(verts_f))
+        cz = sum(v[2] for v in verts_f) / max(1, len(verts_f))
+        bins: dict[int, tuple[float, float, float]] = {}
+        for x, y, z in verts_f:
+            ang = _m.atan2(y - cy, z - cz)
+            bi = int((ang + _m.pi) / (2 * _m.pi) * 96) % 96
+            d = (y - cy) ** 2 + (z - cz) ** 2
+            prev = bins.get(bi)
+            if prev is None or d > prev[0]:
+                bins[bi] = (d, z, y)
+        outline = [(bins[k][1], bins[k][2]) for k in sorted(bins)]
+        if outline:
+            outline.append(outline[0])
+        G = 32
+        occ = np.ones((G, G, G), dtype=np.uint8)  # permissive fallback
+        return _BrainMesh(verts_f, sorted(edge_set), faces_i, occ, G, outline)
+    # Ellipsoid fallback
+    verts_f = []
+    for i in range(24):
+        for j in range(16):
+            u = i / 24 * math.pi * 2
+            v = j / 15 * math.pi - math.pi / 2
+            verts_f.append(
+                (0.55 * math.cos(v) * math.cos(u), 0.70 * math.sin(v), 0.85 * math.cos(v) * math.sin(u))
+            )
+    outline = [(0.85 * math.cos(t), 0.70 * math.sin(t)) for t in [k / 48 * 2 * math.pi for k in range(49)]]
+    return _BrainMesh(verts_f, [], [], np.ones((16, 16, 16), dtype=np.uint8), 16, outline)
 
 
-_OUTLINE_ZY: list[tuple[float, float]] = _load_outline_zy()
+_MESH: _BrainMesh = _load_brain_mesh()
+_OUTLINE_ZY: list[tuple[float, float]] = _MESH.outline_zy
 
 
 def _point_in_poly(z: float, y: float, poly: list[tuple[float, float]] | None = None) -> bool:
-    """Ray-cast point-in-polygon on the lateral (z,y) silhouette."""
+    """Ray-cast point-in-polygon on the mesh-derived lateral (z,y) silhouette."""
     poly = poly or _OUTLINE_ZY
     n = len(poly)
     if n < 3:
@@ -440,7 +469,7 @@ def _point_in_poly(z: float, y: float, poly: list[tuple[float, float]] | None = 
 
 
 def _outline_path_projected(project_fn) -> QPainterPath:
-    """Screen-space closed brain wall via the same projector as filaments."""
+    """Screen-space closed brain wall from mesh ZY silhouette (same projector as filaments)."""
     path = QPainterPath()
     first = True
     for z, y in _OUTLINE_ZY:
@@ -452,7 +481,6 @@ def _outline_path_projected(project_fn) -> QPainterPath:
             path.lineTo(sx, sy)
     path.closeSubpath()
     return path
-
 
 
 
@@ -501,26 +529,33 @@ def _fold_field(x: float, y: float, z: float) -> float:
 
 
 def _in_brain(x: float, y: float, z: float) -> bool:
-    """Anatomical lateral brain volume — hard outline wall + shallow x thickness.
+    """True if (x,y,z) lies inside the anatomical mesh occupancy volume.
 
-    Coords: x=left-right (narrow), y=up-down, z=anterior-posterior.
-    Side view (looking along ±x) reads the closed outline as the outer wall.
+    Coords: x=left-right, y=up (superior+), z=anterior+. Mesh is Y-up with
+    brainstem toward −Y. Occupancy grid covers approx world [−1,1]^3.
     """
-    # Hard lateral silhouette from reference outline (not a soft blob)
-    if not _point_in_poly(z, y):
-        return False
-    # Shallow hemisphere thickness so side view stays a single clean wall
-    # Slightly thicker mid-cerebrum, thinner at stem tip
-    if y < -0.45:
-        x_max = 0.16
-    elif y < -0.15:
-        x_max = 0.28
-    else:
-        x_max = 0.42
-    # Mild fold-driven thickness variation
-    folds = _fold_field(x, y, z)
-    x_max *= 1.0 + max(-0.12, min(0.12, folds * 0.6))
-    return abs(x) <= x_max
+    g = _MESH.occ_g
+    # world [-1,1] → grid
+    fx = (x + 1.0) * 0.5 * (g - 1)
+    fy = (y + 1.0) * 0.5 * (g - 1)
+    fz = (z + 1.0) * 0.5 * (g - 1)
+    ix, iy, iz = int(fx), int(fy), int(fz)
+    if ix < 0 or iy < 0 or iz < 0 or ix >= g or iy >= g or iz >= g:
+        # soft fall back to silhouette + thickness near bounds
+        if not _point_in_poly(z, y):
+            return False
+        return abs(x) <= 0.42
+    if _MESH.occ[ix, iy, iz]:
+        return True
+    # neighborhood soften so filaments hug cortex
+    for dx in (-1, 0, 1):
+        for dy in (-1, 0, 1):
+            for dz in (-1, 0, 1):
+                nx, ny, nz = ix + dx, iy + dy, iz + dz
+                if 0 <= nx < g and 0 <= ny < g and 0 <= nz < g and _MESH.occ[nx, ny, nz]:
+                    return abs(x) <= 0.55
+    return False
+
 
 
 def _radial(x: float, y: float, z: float) -> float:
@@ -738,31 +773,17 @@ def _build_brain(seed: int = 42) -> _BrainGraph:
         seen.add(key)
         edges.append(_Edge(a=key[0], b=key[1], curl=rng.uniform(-0.12, 0.12)))
 
-    # —— OUTER WALL: dense filaments along the anatomical outline ——
-    # This is what makes the silhouette read as a brain, not a soft blob.
+    # —— OUTER WALL: sample anatomical mesh surface (hard 3D wall, not 2D blob) ——
     wall_idx: list[int] = []
-    outline = _OUTLINE_ZY
-    # Subsample outline densely (~every point, plus midpoints)
-    wall_pts: list[tuple[float, float, float]] = []
-    for i in range(len(outline) - 1):
-        z0, y0 = outline[i]
-        z1, y1 = outline[i + 1]
-        # Dense wall samples along each outline segment
-        for t in (0.0, 0.33, 0.66):
-            zz = z0 + (z1 - z0) * t
-            yy = y0 + (y1 - y0) * t
-            wall_pts.append((0.0, yy, zz))
-        # slight ±x thickness so wall has readable volume
-        if i % 2 == 0:
-            wall_pts.append((0.05, y0, z0))
-            wall_pts.append((-0.05, y0, z0))
-
-    for wx, wy, wz in wall_pts:
+    mesh_verts = _MESH.verts
+    # Stratified subsample of mesh verts → filament junctions on the cortex
+    step = max(1, len(mesh_verts) // 140)
+    for vi in range(0, len(mesh_verts), step):
+        wx, wy, wz = mesh_verts[vi]
         before = len(nodes)
-        if _add(wx, wy, wz, 0.016 + rng.random() * 0.008, layer=2, min_d2=0.004):
-            wall_idx.append(before if len(nodes) == before + 1 else len(nodes) - 1)
+        if _add(wx, wy, wz, 0.015 + rng.random() * 0.008, layer=2, min_d2=0.005):
+            wall_idx.append(len(nodes) - 1)
         else:
-            # find nearest existing
             best_i, best_d = 0, 9.0
             for j, n in enumerate(nodes):
                 d = (n.x - wx) ** 2 + (n.y - wy) ** 2 + (n.z - wz) ** 2
@@ -772,24 +793,43 @@ def _build_brain(seed: int = 42) -> _BrainGraph:
             if best_i not in wall_idx:
                 wall_idx.append(best_i)
 
-    # Chain wall nodes in outline order (nearest-neighbor along sequence)
-    for a, b in zip(wall_idx, wall_idx[1:]):
-        key = (a, b) if a < b else (b, a)
-        if key in seen:
-            continue
-        na, nb = nodes[a], nodes[b]
-        d2 = (na.x - nb.x) ** 2 + (na.y - nb.y) ** 2 + (na.z - nb.z) ** 2
-        if d2 > 0.12:
-            continue
-        seen.add(key)
-        edges.append(_Edge(a=key[0], b=key[1], curl=rng.uniform(-0.08, 0.08)))
-    # Close the wall loop
-    if len(wall_idx) >= 2:
-        a, b = wall_idx[-1], wall_idx[0]
-        key = (a, b) if a < b else (b, a)
-        if key not in seen:
+    # Also densify along mesh-derived ZY silhouette so lateral wall reads sharp
+    outline = _OUTLINE_ZY
+    for i in range(len(outline) - 1):
+        z0, y0 = outline[i]
+        z1, y1 = outline[i + 1]
+        for t in (0.0, 0.5):
+            zz = z0 + (z1 - z0) * t
+            yy = y0 + (y1 - y0) * t
+            # pick mesh vert nearest to this lateral rim (prefer |x| small)
+            best_v, best_s = 0, 9.0
+            for j, (vx, vy, vz) in enumerate(mesh_verts):
+                s = (vy - yy) ** 2 + (vz - zz) ** 2 + (vx * vx) * 2.5
+                if s < best_s:
+                    best_s = s
+                    best_v = j
+            wx, wy, wz = mesh_verts[best_v]
+            if _add(wx, wy, wz, 0.016, layer=2, min_d2=0.004):
+                wall_idx.append(len(nodes) - 1)
+
+    # Connect nearby wall junctions into a cortical filament shell
+    for ii, a in enumerate(wall_idx):
+        na = nodes[a]
+        nearest: list[tuple[float, int]] = []
+        for b in wall_idx:
+            if b == a:
+                continue
+            nb = nodes[b]
+            d2 = (na.x - nb.x) ** 2 + (na.y - nb.y) ** 2 + (na.z - nb.z) ** 2
+            if d2 < 0.085:
+                nearest.append((d2, b))
+        nearest.sort()
+        for _, b in nearest[:3]:
+            key = (a, b) if a < b else (b, a)
+            if key in seen:
+                continue
             seen.add(key)
-            edges.append(_Edge(a=key[0], b=key[1], curl=0.0))
+            edges.append(_Edge(a=key[0], b=key[1], curl=rng.uniform(-0.10, 0.10)))
 
     return _BrainGraph(nodes=nodes, edges=edges)
 
@@ -830,12 +870,12 @@ def _filament_rgb(radial: float, lit: float = 0.0) -> tuple[int, int, int]:
 
 
 class OrbVisualizer(QWidget):
-    """Floating procedural neural brain — hard anatomical outer wall + cyan mesh.
+    """Floating 3D mesh brain — anatomical wall + cyan filaments + think pathways.
 
-    Outer silhouette is a closed lateral brain outline (cerebrum + brainstem/
-    cerebellum) used as a hard clip and dense boundary filament wall — never a
-    photo sprite. Hold-click drives listening. Pulses travel along filaments
-    when speaking.
+    Outer wall is the loaded anatomical mesh silhouette (Y-up). Interior is a
+    procedural cyan filament graph constrained inside the mesh. On LISTENING /
+    THINKING (question asked), filaments actively link into visible pathways;
+    they settle back to idle after speaking finishes. Never a photo sprite.
     """
 
     IDLE = "idle"
@@ -871,23 +911,49 @@ class OrbVisualizer(QWidget):
         self._spawn_acc = 0.0
         self._rng = random.Random(7)
         self._lit_edges: dict[int, float] = {}  # edge → remaining axon glow
+        # Thinking pathways: chains of edges that light as linking routes
+        self._pathways: list[dict] = []  # {edges: list[int], step: float, life: float, bright: float}
+        self._path_acc = 0.0
+        self._adj: dict[int, list[int]] = self._build_adjacency()
+        # Cached projected mesh edge samples for wireframe wall (rebuilt lazily)
+        self._mesh_edge_cache_yaw = None
+        self._mesh_draw_edges = list(_MESH.edges[:: max(1, len(_MESH.edges) // 2800)])
 
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._tick)
         self._timer.start(50)  # ~20 fps idle; rises when active
 
     def set_state(self, state: str) -> None:
+        prev = self._state
         self._state = state or self.IDLE
+        # Entering a question/think phase: kick pathway growth
+        if self._state in (self.LISTENING, self.THINKING) and prev not in (
+            self.LISTENING,
+            self.THINKING,
+        ):
+            self._path_acc = 2.5
+        # Answer delivered / idle again: pathways begin settling
+        if self._state == self.IDLE and prev in (self.SPEAKING, self.THINKING, self.LISTENING):
+            for pw in self._pathways:
+                pw["life"] = min(pw.get("life", 1.0), 0.45)
         self.update()
+
+    def _build_adjacency(self) -> dict[int, list[int]]:
+        """Node → neighboring edge indices for pathway chaining."""
+        adj: dict[int, list[int]] = {}
+        for ei, e in enumerate(self._graph.edges):
+            adj.setdefault(e.a, []).append(ei)
+            adj.setdefault(e.b, []).append(ei)
+        return adj
 
     def _activity(self) -> tuple[float, float, float, int]:
         """Return (spawn_rate, pulse_speed, glow_mul, pulse_cap) by state."""
         if self._state == self.SPEAKING:
             return 10.5, 1.70, 1.18, 52
         if self._state == self.LISTENING:
-            return 3.8, 1.15, 0.88, 28
+            return 6.5, 1.25, 0.95, 34  # question in — start linking
         if self._state == self.THINKING:
-            return 5.5, 1.35, 0.98, 36
+            return 12.0, 1.55, 1.12, 48  # actively form pathways
         return 0.70, 0.55, 0.50, 14
 
     def _tick(self) -> None:
@@ -913,6 +979,88 @@ class OrbVisualizer(QWidget):
             + math.sin(self._phase * 1.15 + 0.7) * 0.014
         )
         self._pitch_sway = math.sin(self._phase * 0.28) * 0.04
+
+        # —— Think pathways: filaments actively link across the mesh on question ——
+        thinking = self._state in (self.LISTENING, self.THINKING)
+        speaking = self._state == self.SPEAKING
+        if thinking:
+            path_rate = 4.2 if self._state == self.THINKING else 2.2
+            self._path_acc += path_rate * dt
+            while self._path_acc >= 1.0 and self._graph.edges:
+                self._path_acc -= 1.0
+                if len(self._pathways) >= 14:
+                    break
+                # Grow a multi-hop route from a random cortex-ish node
+                start_e = self._rng.randrange(len(self._graph.edges))
+                chain = [start_e]
+                used = {start_e}
+                cur_node = self._graph.edges[start_e].b
+                hops = 5 + int(self._rng.random() * 7)
+                for _ in range(hops):
+                    cands = [ei for ei in self._adj.get(cur_node, []) if ei not in used]
+                    if not cands:
+                        break
+                    # Prefer edges that travel farther in ZY (cross-brain links)
+                    def _score(ei: int) -> float:
+                        ee = self._graph.edges[ei]
+                        na, nb = self._graph.nodes[ee.a], self._graph.nodes[ee.b]
+                        return abs(na.z - nb.z) * 1.4 + abs(na.y - nb.y) + self._rng.random() * 0.15
+                    cands.sort(key=_score, reverse=True)
+                    nxt = cands[0]
+                    chain.append(nxt)
+                    used.add(nxt)
+                    ee = self._graph.edges[nxt]
+                    cur_node = ee.b if ee.a == cur_node else ee.a
+                self._pathways.append(
+                    {
+                        "edges": chain,
+                        "step": 0.0,
+                        "life": 1.0,
+                        "bright": 0.85 + self._rng.random() * 0.15,
+                        "growing": True,
+                    }
+                )
+                # Seed pulses along the new chain so synapses fire visibly
+                for ei in chain[:3]:
+                    self._pulses.append(
+                        _Pulse(
+                            edge=ei,
+                            t=0.0,
+                            speed=1.2 + self._rng.random() * 0.6,
+                            bright=0.95,
+                            width=1.35,
+                        )
+                    )
+                    self._lit_edges[ei] = 1.0
+        elif speaking:
+            # Keep existing pathways lit but stop growing new ones; slow decay
+            self._path_acc = 0.0
+        else:
+            self._path_acc = max(0.0, self._path_acc - dt * 2.0)
+
+        alive_paths: list[dict] = []
+        for pw in self._pathways:
+            n_e = max(1, len(pw["edges"]))
+            if pw.get("growing") and thinking:
+                pw["step"] = min(float(n_e), pw["step"] + dt * (8.0 if self._state == self.THINKING else 5.0))
+                if pw["step"] >= n_e - 0.05:
+                    pw["growing"] = False
+            elif speaking:
+                pw["step"] = min(float(n_e), pw["step"] + dt * 3.0)
+                pw["life"] -= dt * 0.15
+            else:
+                pw["life"] -= dt * 0.55  # settle to idle
+            # Light edges along revealed portion of the pathway
+            reveal = int(pw["step"]) + 1
+            for k, ei in enumerate(pw["edges"][:reveal]):
+                fade = pw["life"] * pw["bright"] * (0.65 + 0.35 * (k / max(1, reveal)))
+                self._lit_edges[ei] = max(self._lit_edges.get(ei, 0.0), fade)
+                e = self._graph.edges[ei]
+                self._graph.nodes[e.a].flash = max(self._graph.nodes[e.a].flash, 0.55 * fade)
+                self._graph.nodes[e.b].flash = max(self._graph.nodes[e.b].flash, 0.55 * fade)
+            if pw["life"] > 0.04:
+                alive_paths.append(pw)
+        self._pathways = alive_paths
 
         spawn_rate, pulse_speed, _, pulse_cap = self._activity()
         self._spawn_acc += spawn_rate * dt
@@ -1048,7 +1196,7 @@ class OrbVisualizer(QWidget):
         xr += parallax * 0.04 * math.sin(self._yaw + 0.5)
         persp = 1.0 / (1.0 + z2 * 0.36)
         sx = cx + xr * scale * persp
-        sy = cy + y2 * scale * persp
+        sy = cy - y2 * scale * persp  # world +Y (superior) → screen up
         depth = 0.5 + 0.5 * max(-1.0, min(1.0, z2 * 1.05))
         return sx, sy, depth
 
@@ -1106,6 +1254,36 @@ class OrbVisualizer(QWidget):
         painter.save()
         painter.setClipPath(wall, Qt.ClipOperation.IntersectClip)
 
+        # —— 3D mesh wireframe wall (anatomical surface, Y-up) ——
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        mv = _MESH.verts
+        # Depth-sort a subset of mesh edges for a readable cortex shell
+        edge_draw: list[tuple[float, int, int]] = []
+        for ai, bi in self._mesh_draw_edges:
+            ax, ay, az = mv[ai]
+            bx, by, bz = mv[bi]
+            # skip back-hemisphere edges when looking along +x (lateral)
+            mid_x = (ax + bx) * 0.5
+            sa = self._project(ax, ay, az, cx, cy, scale)
+            sb = self._project(bx, by, bz, cx, cy, scale)
+            mid_d = (sa[2] + sb[2]) * 0.5
+            if mid_d < 0.18:
+                continue
+            # Prefer edges near the silhouette (small |rotated x| ≈ facing camera plane)
+            edge_draw.append((mid_d + abs(mid_x) * 0.15, ai, bi))
+        edge_draw.sort(key=lambda t: t[0])
+        # Dim structural mesh under filaments
+        for mid_d, ai, bi in edge_draw:
+            ax, ay, az = mv[ai]
+            bx, by, bz = mv[bi]
+            sa = self._project(ax, ay, az, cx, cy, scale)
+            sb = self._project(bx, by, bz, cx, cy, scale)
+            a = (28 + 55 * mid_d) * (0.55 + 0.45 * intensity)
+            pen = QPen(QColor(70, 180, 200, _a(a)), 0.70 + 0.35 * mid_d)
+            pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+            painter.setPen(pen)
+            painter.drawLine(QPointF(sa[0], sa[1]), QPointF(sb[0], sb[1]))
+
         # Soft volumetric glow inside the wall only
         core_glow = QRadialGradient(QPointF(cx, cy + scale * 0.04), scale * 0.48)
         core_glow.setColorAt(0.0, QColor(40, 90, 110, _a(40 * intensity)))
@@ -1149,6 +1327,9 @@ class OrbVisualizer(QWidget):
             lit = self._lit_edges.get(ei, 0.0)
             on_pulse = ei in pulse_on
             rad = (_radial(na.x, na.y, na.z) + _radial(nb.x, nb.y, nb.z)) * 0.5
+            on_path = lit > 0.55 and self._state in (
+                self.LISTENING, self.THINKING, self.SPEAKING
+            )
 
             # Soft DoF: back filaments dimmer / softer
             dof = 0.38 + 0.62 * mid_d
@@ -1157,6 +1338,8 @@ class OrbVisualizer(QWidget):
             base_a += lit * 105
             if on_pulse:
                 base_a += 95
+            if on_path:
+                base_a += 70  # pathway links read as active connections
             # Cortex edges a touch brighter for silhouette
             if max(na.layer, nb.layer) >= 2:
                 base_a *= 1.12
@@ -1170,6 +1353,8 @@ class OrbVisualizer(QWidget):
             width += flash * 0.50 + lit * 0.65
             if on_pulse:
                 width += 1.10 * pulse_on[ei].width
+            if on_path:
+                width += 0.85 + 0.55 * lit
             if mid_d < 0.40:
                 width += 0.30
 

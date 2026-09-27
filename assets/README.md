@@ -1,8 +1,10 @@
 # Neural brain HUD assets
 
-- `brain-ref-side.png` — visual north star only (not painted). Used to extract the
-  lateral silhouette polygon in `brain_outline_side.json`.
-- `brain_outline_side.json` — closed `(z, y)` outline (anterior+, superior+) for
-  **hard clip + dense outer-wall filaments**. Photo is never displayed.
-- `brain-ref.png` — earlier reference (kept for history).
-- Brain mesh itself is procedural in `hud_widgets.py`.
+- `brain_mesh.obj` / `brain_mesh.npz` — anatomical cerebrum+brainstem mesh (Y-up).
+  Source: FrankJohansson “Human brain, Cerebrum & Brainstem” (CC BY 4.0).
+  See `THIRD_PARTY_BRAIN_MESH.md`. Used as the hard 3D outer wall + occupancy
+  for interior filament constraints. Never painted as a photo sprite.
+- `brain-ref-side.png` / `brain-ref.png` — visual north-star references only
+  (not painted by the HUD).
+- `brain_outline_side.json` — legacy 2D silhouette (superseded by mesh-derived
+  outline baked into `brain_mesh.npz`; kept for reference).
