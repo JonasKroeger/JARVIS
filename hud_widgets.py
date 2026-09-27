@@ -976,7 +976,7 @@ class OrbVisualizer(QWidget):
 
     def _tick(self) -> None:
         # Adaptive cadence: snappier when active, but never faster than paint can finish
-        base = 70 if self._state == self.IDLE else 40
+        base = 100 if self._state == self.IDLE else 40
         # If last paint was heavy, back off so the GUI thread doesn't pile updates
         interval = max(base, int(self._last_paint_ms * 1.25) + 6)
         interval = min(interval, 90)  # floor ~11 fps even under load
